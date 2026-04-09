@@ -1,0 +1,26 @@
+[package]
+name = "scheduler_module"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.7", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+run_task_module = { path = "../run_task_module" }
+send_emails_module = { path = "../send_emails_module" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[[bin]]
+name = "inbound_gateway"
+path = "src/bin/inbound_gateway.rs"
+
+[[bin]]
+name = "rust_service"
+path = "src/bin/rust_service.rs"
