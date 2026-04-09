@@ -12,6 +12,8 @@ pub fn prepare_workspace(workspace_dir: &Path, prompt: &str) -> Result<PreparedW
     let stdout_path = workspace_dir.join(".task_stdout.log");
     let reply_html_path = workspace_dir.join("reply_email_draft.html");
     let reply_attachments_dir = workspace_dir.join("reply_email_attachments");
+    let manifest_path = workspace_dir.join("workspace_manifest.json");
+    let secrets_env_path = workspace_dir.join(".task_secrets.env");
 
     fs::create_dir_all(&reply_attachments_dir)?;
     fs::write(&prompt_path, prompt)?;
@@ -22,6 +24,8 @@ pub fn prepare_workspace(workspace_dir: &Path, prompt: &str) -> Result<PreparedW
         stdout_path,
         reply_html_path,
         reply_attachments_dir,
+        manifest_path,
+        secrets_env_path,
         prompt: prompt.to_string(),
     })
 }

@@ -13,6 +13,8 @@ billing, analytics, and legacy product layers.
 
 For a direct explanation of the technical debt found in the upstream repo and how
 this lightweight version addresses it, see [`TECHNICAL_DEBT.md`](TECHNICAL_DEBT.md).
+For the scaling and runtime design notes added in response to issue feedback, see
+[`docs/scaling_and_runtime.md`](docs/scaling_and_runtime.md).
 
 ## Why this repo exists
 
@@ -62,7 +64,16 @@ curl -X POST http://127.0.0.1:9100/tasks \
   }'
 ```
 
-The worker writes per-task artifacts under `.workspace/tasks/<task-id>/`.
+The worker writes per-task artifacts under `.workspace/tasks/`.
+
+For multi-tenant requests, the scheduler now partitions workspaces as:
+
+```text
+.workspace/tasks/<tenant>/<account>/<task-id>/
+```
+
+Each task gets a `workspace_manifest.json` that records the stable workspace key,
+identity URI, memory URI, and credential references needed by downstream workers.
 
 ## Containerized Codex boundary
 
@@ -70,8 +81,36 @@ The worker writes per-task artifacts under `.workspace/tasks/<task-id>/`.
 When `RUN_TASK_USE_CONTAINER=1`, it builds a `docker run` invocation that mounts the
 workspace and delegates execution to `containers/codex-runner/entrypoint.sh`.
 
-The sample image is intentionally minimal. Replace its internals with a real Codex CLI
-install in environments where the agent runtime is available.
+The actual Codex execution contract now lives in
+`containers/codex-runner/exec_codex.sh`. The image supports two modes:
+
+- `RUN_TASK_CONTAINER_MODE=one_shot`: start one container per task.
+- `RUN_TASK_CONTAINER_MODE=warm_pool`: keep a long-lived container alive and execute
+  `/app/exec_codex.sh` via `docker exec` against a shared mounted task root.
+
+Build the runner image with:
+
+```bash
+docker build -t dowhiz/codex-runner:latest -f containers/codex-runner/Dockerfile .
+```
+
+If a task needs per-user credentials such as an Azure Blob SAS token, write them into
+`<workspace>/.task_secrets.env` right before execution or pass specific host variables
+through `RUN_TASK_CONTAINER_ENV_PASSTHROUGH`. That keeps task-secret injection local to
+the worker node and does not require cloud orchestration.
+
+## Outbound delivery
+
+`send_emails_module` now supports both preview generation and actual Postmark delivery.
+With `OUTBOUND_DELIVERY_MODE=postmark`, the worker will POST the finished reply to the
+Postmark `/email` API and write `delivery_report.json` alongside `transport_preview.json`.
+
+Required env:
+
+```bash
+POSTMARK_SERVER_TOKEN=...
+POSTMARK_FROM=bot@example.com
+```
 
 ## Notes
 

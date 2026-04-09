@@ -3,14 +3,14 @@ mod local;
 mod types;
 mod workspace;
 
-pub use types::{RunTaskOutput, RunTaskParams};
+pub use types::{ContainerMode, RunTaskOutput, RunTaskParams};
 
 use anyhow::Result;
 
 pub fn run_task(params: &RunTaskParams) -> Result<RunTaskOutput> {
     let prepared = workspace::prepare_workspace(&params.workspace_dir, &params.prompt)?;
     let stdout = if params.use_container {
-        container::run_in_container(&prepared, &params.container_image)?
+        container::run_in_container(&prepared, params)?
     } else {
         local::run_locally(&prepared)?
     };
