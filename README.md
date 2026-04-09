@@ -11,6 +11,9 @@ This repo is intentionally small. It focuses on the parts that define the produc
 core execution model and leaves out channel-specific integrations, auth surfaces,
 billing, analytics, and legacy product layers.
 
+For a direct explanation of the technical debt found in the upstream repo and how
+this lightweight version addresses it, see [`TECHNICAL_DEBT.md`](TECHNICAL_DEBT.md).
+
 ## Why this repo exists
 
 The upstream `KnoWhiz/DoWhiz` repository is powerful, but the core Rust service has
@@ -22,7 +25,7 @@ need to be. This repo demonstrates a trimmed architecture with:
 - One queue abstraction with a local file-backed implementation
 - One task runner crate with a container boundary for Codex-style execution
 - One outbound email preview crate
-- One focused writeup of the inefficiencies that were removed
+- One top-level technical debt summary plus a detailed audit writeup
 
 ## Layout
 
@@ -30,6 +33,7 @@ need to be. This repo demonstrates a trimmed architecture with:
 - `run_task_module/`: local runner and container runner for Codex-style execution
 - `send_emails_module/`: outbound preview builder
 - `containers/codex-runner/`: example container contract for task execution
+- `TECHNICAL_DEBT.md`: direct summary of the technical debt and how this repo responds
 - `docs/inefficiencies_solved.md`: audit summary and design rationale
 
 ## Quick start
