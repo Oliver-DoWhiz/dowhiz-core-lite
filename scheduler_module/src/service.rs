@@ -32,9 +32,11 @@ pub async fn run_gateway(config: GatewayConfig) -> Result<()> {
         .route("/tasks", post(create_task))
         .with_state(state);
 
+    // Axum serves HTTP on top of a TCP socket here. In production, HTTPS should
+    // terminate at a reverse proxy or load balancer in front of this gateway.
     let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port)).await?;
     let addr = listener.local_addr().unwrap_or(SocketAddr::from(([0, 0, 0, 0], config.port)));
-    tracing::info!("gateway listening on {}", addr);
+    tracing::info!("http gateway listening on {}", addr);
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -10,6 +10,16 @@ pub struct InboundTaskRequest {
     pub channel: String,
     #[serde(default)]
     pub reply_to: String,
+    #[serde(default)]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub account_id: String,
+    #[serde(default)]
+    pub memory_uri: String,
+    #[serde(default)]
+    pub identity_uri: String,
+    #[serde(default)]
+    pub credential_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,6 +37,7 @@ pub struct QueuedTask {
     pub created_at: DateTime<Utc>,
     pub status: TaskStatus,
     pub request: InboundTaskRequest,
+    pub workspace_key: String,
     pub workspace_dir: String,
 }
 

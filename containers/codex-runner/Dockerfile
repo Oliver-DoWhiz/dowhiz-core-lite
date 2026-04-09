@@ -7,6 +7,7 @@ RUN apt-get update \
 WORKDIR /workspace
 
 COPY containers/codex-runner/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+COPY containers/codex-runner/exec_codex.sh /app/exec_codex.sh
+RUN chmod +x /app/entrypoint.sh /app/exec_codex.sh
 
 ENTRYPOINT ["/app/entrypoint.sh"]

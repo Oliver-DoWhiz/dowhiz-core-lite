@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -7,6 +6,7 @@ use uuid::Uuid;
 
 use crate::models::{InboundTaskRequest, QueuedTask, TaskStatus};
 use crate::queue::FileQueue;
+use crate::workspace_registry::{initialize_workspace, plan_workspace};
 
 #[derive(Debug, Clone)]
 pub struct TaskScheduler {
@@ -17,50 +17,26 @@ pub struct TaskScheduler {
 impl TaskScheduler {
     pub fn new(queue: FileQueue, tasks_root: impl Into<PathBuf>) -> Result<Self> {
         let tasks_root = tasks_root.into();
-        fs::create_dir_all(&tasks_root)?;
+        std::fs::create_dir_all(&tasks_root)?;
         Ok(Self { queue, tasks_root })
     }
 
     pub fn submit(&self, request: InboundTaskRequest) -> Result<QueuedTask> {
         let task_id = Uuid::new_v4().to_string();
-        let workspace_dir = self.tasks_root.join(&task_id);
-        self.prepare_workspace(&workspace_dir, &request)?;
+        let created_at = Utc::now();
+        let layout = plan_workspace(&self.tasks_root, &task_id, &request);
+        let manifest = initialize_workspace(&layout, &task_id, created_at, &request)?;
 
         let task = QueuedTask {
             id: task_id,
-            created_at: Utc::now(),
+            created_at,
             status: TaskStatus::Pending,
             request,
-            workspace_dir: workspace_dir.display().to_string(),
+            workspace_key: manifest.workspace_key,
+            workspace_dir: manifest.workspace_dir,
         };
 
         self.queue.enqueue(&task)?;
         Ok(task)
     }
-
-    fn prepare_workspace(&self, workspace_dir: &PathBuf, request: &InboundTaskRequest) -> Result<()> {
-        fs::create_dir_all(workspace_dir.join("incoming_email"))?;
-        fs::create_dir_all(workspace_dir.join("incoming_attachments"))?;
-        fs::create_dir_all(workspace_dir.join("reply_email_attachments"))?;
-        fs::write(
-            workspace_dir.join("incoming_email/thread_request.md"),
-            render_thread_request(request),
-        )?;
-        fs::write(
-            workspace_dir.join("task_request.json"),
-            serde_json::to_string_pretty(request)?,
-        )?;
-        Ok(())
-    }
-}
-
-fn render_thread_request(request: &InboundTaskRequest) -> String {
-    format!(
-        "# Incoming request\n\nFrom: {}\nSubject: {}\nChannel: {}\nReply-To: {}\n\n## Prompt\n{}\n",
-        request.customer_email,
-        request.subject,
-        request.channel,
-        request.reply_to,
-        request.prompt
-    )
 }
