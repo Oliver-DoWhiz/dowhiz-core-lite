@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
+use serde::Deserialize;
 
 use crate::types::{ContainerMode, PreparedWorkspace, RunTaskParams};
 
@@ -22,7 +23,7 @@ pub fn run_in_container(prepared: &PreparedWorkspace, params: &RunTaskParams) ->
 }
 
 fn run_one_shot(prepared: &PreparedWorkspace, params: &RunTaskParams) -> Result<()> {
-    let workspace = canonicalize(&prepared.workspace_dir)?;
+    let workspace = canonicalize_path(&prepared.workspace_dir)?;
     let mut command = Command::new("docker");
     command
         .arg("run")
@@ -44,43 +45,59 @@ fn run_one_shot(prepared: &PreparedWorkspace, params: &RunTaskParams) -> Result<
 }
 
 fn run_warm_pool(prepared: &PreparedWorkspace, params: &RunTaskParams) -> Result<()> {
-    let workspace = canonicalize(&prepared.workspace_dir)?;
-    let host_root = params
-        .container_host_root
-        .as_ref()
-        .context("warm container mode requires RUN_TASK_CONTAINER_HOST_ROOT")?;
-    let host_root = canonicalize(host_root)?;
-    let relative_workspace = workspace
-        .strip_prefix(&host_root)
-        .with_context(|| {
-            format!(
-                "workspace {} is not inside warm pool root {}",
-                workspace.display(),
-                host_root.display()
-            )
-        })?;
-
-    let pool_name = pool_name(&params.container_pool_name, &host_root, &params.container_image);
-    ensure_pool_container(&pool_name, &host_root, params)?;
+    let workspace = canonicalize_path(&prepared.workspace_dir)?;
+    let relative_workspace = relative_workspace_key(&prepared.manifest_path, &workspace)?;
+    let pool_name = pool_name(
+        &params.container_pool_name,
+        &params.container_image,
+        &params.container_workspace_root,
+    );
+    ensure_pool_container(&pool_name, params)?;
 
     let container_workspace_root = normalize_container_root(&params.container_workspace_root);
-    let container_workspace = join_container_path(&container_workspace_root, relative_workspace);
+    let container_workspace = join_container_path(&container_workspace_root, &relative_workspace);
 
+    sync_workspace_to_pool(&pool_name, &workspace, &container_workspace)?;
+
+    let exec_output = run_pool_exec(
+        &pool_name,
+        &container_workspace,
+        &container_workspace_root,
+        prepared,
+        params,
+    );
+    let sync_back_result = sync_workspace_from_pool(&pool_name, &container_workspace, &workspace);
+    let cleanup_result = cleanup_container_workspace(&pool_name, &container_workspace);
+
+    sync_back_result?;
+    cleanup_result?;
+    let exec_output = exec_output?;
+    ensure_success(
+        exec_output.status.success(),
+        &exec_output.stderr,
+        "warm container exec",
+    )?;
+
+    Ok(())
+}
+
+fn run_pool_exec(
+    pool_name: &str,
+    container_workspace: &str,
+    container_workspace_root: &str,
+    prepared: &PreparedWorkspace,
+    params: &RunTaskParams,
+) -> Result<std::process::Output> {
     let mut command = Command::new("docker");
     command.arg("exec");
     append_passthrough_env(&mut command, &params.env_passthrough);
     append_secret_env(&mut command, &prepared.secrets_env_path)?;
-    append_task_env(&mut command, &container_workspace, &container_workspace_root);
-    let output = command
-        .arg(pool_name)
-        .arg("/app/exec_codex.sh")
-        .output()?;
-
-    ensure_success(output.status.success(), &output.stderr, "warm container exec")?;
-    Ok(())
+    append_task_env(&mut command, container_workspace, container_workspace_root);
+    command.arg(pool_name).arg("/app/exec_codex.sh");
+    Ok(command.output()?)
 }
 
-fn ensure_pool_container(pool_name: &str, host_root: &Path, params: &RunTaskParams) -> Result<()> {
+fn ensure_pool_container(pool_name: &str, params: &RunTaskParams) -> Result<()> {
     let inspect = Command::new("docker")
         .arg("inspect")
         .arg("-f")
@@ -101,7 +118,6 @@ fn ensure_pool_container(pool_name: &str, host_root: &Path, params: &RunTaskPara
         )?;
     }
 
-    let container_root = normalize_container_root(&params.container_workspace_root);
     let output = Command::new("docker")
         .arg("run")
         .arg("-d")
@@ -110,8 +126,6 @@ fn ensure_pool_container(pool_name: &str, host_root: &Path, params: &RunTaskPara
         .arg(pool_name)
         .arg("-e")
         .arg("CODEX_RUNNER_MODE=pool")
-        .arg("-v")
-        .arg(format!("{}:{}", host_root.display(), container_root))
         .arg(&params.container_image)
         .output()?;
     ensure_success(
@@ -120,6 +134,79 @@ fn ensure_pool_container(pool_name: &str, host_root: &Path, params: &RunTaskPara
         "warm pool bootstrap",
     )?;
 
+    let container_root = normalize_container_root(&params.container_workspace_root);
+    ensure_container_dir(pool_name, &container_root)?;
+    Ok(())
+}
+
+fn sync_workspace_to_pool(pool_name: &str, workspace: &Path, container_workspace: &str) -> Result<()> {
+    let parent = Path::new(container_workspace)
+        .parent()
+        .ok_or_else(|| anyhow!("container workspace has no parent: {}", container_workspace))?;
+    ensure_container_dir(pool_name, &parent.display().to_string())?;
+    cleanup_container_workspace(pool_name, container_workspace)?;
+    ensure_container_dir(pool_name, container_workspace)?;
+
+    let destination = format!("{}:{}", pool_name, container_workspace);
+    let source = format!("{}/.", workspace.display());
+    let output = Command::new("docker")
+        .arg("cp")
+        .arg(source)
+        .arg(destination)
+        .output()?;
+    ensure_success(
+        output.status.success(),
+        &output.stderr,
+        "warm pool workspace upload",
+    )?;
+    Ok(())
+}
+
+fn sync_workspace_from_pool(pool_name: &str, container_workspace: &str, workspace: &Path) -> Result<()> {
+    fs::create_dir_all(workspace)?;
+    let source = format!("{}:{}/.", pool_name, container_workspace);
+    let output = Command::new("docker")
+        .arg("cp")
+        .arg(source)
+        .arg(workspace)
+        .output()?;
+    ensure_success(
+        output.status.success(),
+        &output.stderr,
+        "warm pool workspace download",
+    )?;
+    Ok(())
+}
+
+fn ensure_container_dir(pool_name: &str, directory: &str) -> Result<()> {
+    let output = Command::new("docker")
+        .arg("exec")
+        .arg(pool_name)
+        .arg("mkdir")
+        .arg("-p")
+        .arg(directory)
+        .output()?;
+    ensure_success(
+        output.status.success(),
+        &output.stderr,
+        "warm pool mkdir",
+    )?;
+    Ok(())
+}
+
+fn cleanup_container_workspace(pool_name: &str, container_workspace: &str) -> Result<()> {
+    let output = Command::new("docker")
+        .arg("exec")
+        .arg(pool_name)
+        .arg("rm")
+        .arg("-rf")
+        .arg(container_workspace)
+        .output()?;
+    ensure_success(
+        output.status.success(),
+        &output.stderr,
+        "warm pool workspace cleanup",
+    )?;
     Ok(())
 }
 
@@ -182,10 +269,26 @@ fn read_env_pairs(path: &Path) -> Result<Vec<(String, String)>> {
     Ok(vars)
 }
 
-fn pool_name(prefix: &str, host_root: &Path, image: &str) -> String {
+fn relative_workspace_key(manifest_path: &Path, workspace: &Path) -> Result<PathBuf> {
+    if manifest_path.exists() {
+        let manifest: WorkspaceManifestRef = serde_json::from_str(&fs::read_to_string(manifest_path)?)?;
+        if !manifest.workspace_key.trim().is_empty() {
+            return Ok(PathBuf::from(manifest.workspace_key));
+        }
+    }
+
+    let fallback = workspace
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("task-workspace");
+    Ok(PathBuf::from(fallback))
+}
+
+fn pool_name(prefix: &str, image: &str, container_root: &str) -> String {
     let mut hasher = DefaultHasher::new();
-    host_root.hash(&mut hasher);
     image.hash(&mut hasher);
+    container_root.hash(&mut hasher);
     format!("{}-{:x}", sanitize_name(prefix), hasher.finish())
 }
 
@@ -225,7 +328,7 @@ fn join_container_path(root: &str, relative: &Path) -> String {
     format!("{}/{}", root.trim_end_matches('/'), relative)
 }
 
-fn canonicalize(path: &PathBuf) -> Result<PathBuf> {
+fn canonicalize_path(path: &Path) -> Result<PathBuf> {
     if path.exists() {
         Ok(path.canonicalize()?)
     } else {
@@ -239,5 +342,43 @@ fn ensure_success(success: bool, stderr: &[u8], operation: &str) -> Result<()> {
     } else {
         let stderr = String::from_utf8_lossy(stderr);
         bail!("{} failed: {}", operation, stderr.trim());
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceManifestRef {
+    workspace_key: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn uses_manifest_workspace_key_for_pool_partitioning() {
+        let root = temp_dir("warm-pool-key");
+        let manifest_path = root.join("workspace_manifest.json");
+        fs::write(&manifest_path, r#"{"workspace_key":"prod/user_42/task-1"}"#).unwrap();
+
+        let relative = relative_workspace_key(&manifest_path, &root).unwrap();
+
+        assert_eq!(relative, PathBuf::from("prod/user_42/task-1"));
+    }
+
+    #[test]
+    fn joins_container_paths_without_double_slashes() {
+        let path = join_container_path("/srv/dowhiz/tasks/", Path::new("prod/user_42/task-1"));
+        assert_eq!(path, "/srv/dowhiz/tasks/prod/user_42/task-1");
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("{}-{}", prefix, unique));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 }

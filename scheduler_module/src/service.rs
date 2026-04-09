@@ -8,6 +8,9 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::config::GatewayConfig;
+use crate::inbound_email::{
+    persist_postmark_inbound_artifacts, task_request_from_postmark, PostmarkInboundPayload,
+};
 use crate::models::{InboundTaskRequest, QueuedTask};
 use crate::queue::FileQueue;
 use crate::scheduler::TaskScheduler;
@@ -30,6 +33,7 @@ pub async fn run_gateway(config: GatewayConfig) -> Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/tasks", post(create_task))
+        .route("/webhooks/postmark/inbound", post(receive_postmark_inbound))
         .with_state(state);
 
     // Axum serves HTTP on top of a TCP socket here. In production, HTTPS should
@@ -54,6 +58,21 @@ async fn create_task(
         .submit(request)
         .map(Json)
         .map_err(internal_error)
+}
+
+async fn receive_postmark_inbound(
+    State(state): State<AppState>,
+    Json(payload): Json<PostmarkInboundPayload>,
+) -> std::result::Result<Json<QueuedTask>, (axum::http::StatusCode, String)> {
+    let request = task_request_from_postmark(&payload);
+    let queued = state
+        .scheduler
+        .submit_with_initializer(request.clone(), |workspace_dir| {
+            persist_postmark_inbound_artifacts(workspace_dir, &payload, &request)
+        })
+        .map_err(internal_error)?;
+
+    Ok(Json(queued))
 }
 
 fn internal_error(err: anyhow::Error) -> (axum::http::StatusCode, String) {

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+/app/configure_codex.sh
+
 if [[ $# -gt 0 ]]; then
   exec "$@"
 fi

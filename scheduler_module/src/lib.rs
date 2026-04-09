@@ -1,4 +1,5 @@
 pub mod config;
+pub mod inbound_email;
 pub mod models;
 pub mod queue;
 pub mod scheduler;
