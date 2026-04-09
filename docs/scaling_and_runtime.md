@@ -50,11 +50,13 @@ resolve the same workspace key.
 ## 3. Docker image build and warm container strategy
 
 The Dockerfile already existed at `containers/codex-runner/Dockerfile`, but the runtime
-contract was too vague. The repo now supports two execution modes:
+contract was too vague. The image now installs `@openai/codex`, and the entrypoint
+normalizes `OPENAI_API_KEY` / `OPENAI_BASE_URL` or `AZURE_OPENAI_*` variables into the
+runtime config that `codex exec` reads. The repo supports two execution modes:
 
 - `one_shot`: one `docker run --rm` per task
-- `warm_pool`: one long-lived container per mounted task root, then `docker exec` for
-  each task
+- `warm_pool`: one long-lived container with no tenant workspace mounted, then
+  `docker cp` + `docker exec` + `docker cp` for each task
 
 Warm pool behavior is implemented in `run_task_module/src/container.rs`. The pool is
 useful because:
@@ -63,16 +65,18 @@ useful because:
 - toolchains stay hot
 - repeated agent tasks avoid per-task container bootstrap cost
 
-To get task data into the container without cloud infrastructure:
+To get task data into the container without exposing the entire file share:
 
-1. Mount the shared task root into the container.
-2. Resolve each task to a relative workspace path.
-3. Pass task-specific files and env vars into `docker exec`.
-4. Put per-task secrets into `.task_secrets.env` right before execution, then delete it
+1. Keep the warm pool container provisioned from the deploy-time image only.
+2. Resolve each task to a relative workspace key such as `tenant/account/task-id`.
+3. Copy just that workspace into the running container before `docker exec`.
+4. Copy the finished workspace back out and remove the container-side copy after the run.
+5. Put per-task secrets into `.task_secrets.env` right before execution, then delete it
    after the task if desired.
 
-That works on a single VM, a bare-metal box, or any host with Docker access. Cloud
-services are helpful, but not required for the basic orchestration model.
+That works on a single VM, a bare-metal box, or any host with Docker access. It also
+maps cleanly onto a queue-driven deployment because the warm container no longer depends
+on a broad bind mount existing ahead of time.
 
 ## 4. Full outbound Postmark implementation
 
@@ -130,7 +134,32 @@ The key rule is that queue ownership and workspace ownership must be decoupled. 
 should only validate requests and enqueue metadata. Workers should resolve workspace
 state from the registry and then run the task.
 
-## 7. Why the gateway uses a TCP listener
+If DoWhiz keeps using an Azure Storage Queue plus a workspace SAS token, I would keep the
+queue message minimal:
+
+- workspace key
+- storage URI or SAS-scoped fetch URI for the task workspace
+- identity and memory references
+- requested channel metadata
+
+The worker can then fetch only that task workspace into its local staging area, run
+`docker cp` into the already-provisioned warm container, execute the task, and upload the
+resulting reply artifacts back to durable storage. That preserves the current queue-based
+shape without exposing a tenant-wide share inside the container.
+
+## 7. Inbound webhooks
+
+Outbound delivery is no longer the only mail integration. The gateway now also accepts
+`POST /webhooks/postmark/inbound`, persists the raw provider payload, decodes merged
+attachments into the task workspace, and then queues a normal `InboundTaskRequest`.
+
+That keeps the scheduler boundary clean:
+
+```text
+postmark webhook -> inbound_email adapter -> task scheduler -> queue -> worker
+```
+
+## 8. Why the gateway uses a TCP listener
 
 `service.rs` does not process raw TCP payloads. It binds a TCP socket because HTTP servers
 need a socket transport. Axum then serves HTTP JSON on top of that listener.

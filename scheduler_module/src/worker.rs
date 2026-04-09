@@ -61,11 +61,6 @@ impl WorkerService {
             use_container: self.config.use_container,
             container_image: self.config.container_image.clone(),
             container_mode: self.config.container_mode,
-            container_host_root: self
-                .config
-                .container_host_root
-                .clone()
-                .or_else(|| Some(self.config.tasks_root.clone())),
             container_workspace_root: self.config.container_workspace_root.clone(),
             container_pool_name: self.config.container_pool_name.clone(),
             env_passthrough: self.config.container_env_passthrough.clone(),

@@ -86,7 +86,8 @@ The actual Codex execution contract now lives in
 
 - `RUN_TASK_CONTAINER_MODE=one_shot`: start one container per task.
 - `RUN_TASK_CONTAINER_MODE=warm_pool`: keep a long-lived container alive and execute
-  `/app/exec_codex.sh` via `docker exec` against a shared mounted task root.
+  `/app/exec_codex.sh` via `docker exec` after copying only the active task workspace
+  into the container and scrubbing it afterward.
 
 Build the runner image with:
 
@@ -94,10 +95,25 @@ Build the runner image with:
 docker build -t dowhiz/codex-runner:latest -f containers/codex-runner/Dockerfile .
 ```
 
-If a task needs per-user credentials such as an Azure Blob SAS token, write them into
+The image now installs `@openai/codex` and the entrypoint writes `~/.codex/config.toml`
+from the environment. Use `OPENAI_API_KEY` for the default provider, or supply the
+`AZURE_OPENAI_*` variables to normalize an Azure-compatible endpoint into the same
+runtime contract.
+
+If a task needs per-user credentials such as a workspace SAS token, write them into
 `<workspace>/.task_secrets.env` right before execution or pass specific host variables
-through `RUN_TASK_CONTAINER_ENV_PASSTHROUGH`. That keeps task-secret injection local to
-the worker node and does not require cloud orchestration.
+through `RUN_TASK_CONTAINER_ENV_PASSTHROUGH`. Warm-pool mode no longer mounts the full
+task tree into the container, so only the current task workspace is exposed during each
+execution.
+
+## Inbound webhooks
+
+The gateway exposes two ingress paths:
+
+- `POST /tasks`: submit a normalized task directly
+- `POST /webhooks/postmark/inbound`: accept a Postmark inbound webhook, persist the raw
+  payload under `incoming_email/`, decode any merged attachments into
+  `incoming_attachments/`, and queue the task for the worker
 
 ## Outbound delivery
 

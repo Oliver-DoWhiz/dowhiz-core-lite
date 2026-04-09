@@ -34,7 +34,6 @@ pub struct WorkerConfig {
     pub use_container: bool,
     pub container_image: String,
     pub container_mode: ContainerMode,
-    pub container_host_root: Option<PathBuf>,
     pub container_workspace_root: String,
     pub container_pool_name: String,
     pub container_env_passthrough: Vec<String>,
@@ -70,10 +69,6 @@ impl WorkerConfig {
                 "warm_pool" => ContainerMode::WarmPool,
                 _ => ContainerMode::OneShot,
             },
-            container_host_root: env::var("RUN_TASK_CONTAINER_HOST_ROOT")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .map(PathBuf::from),
             container_workspace_root: env::var("RUN_TASK_CONTAINER_WORKSPACE_ROOT")
                 .unwrap_or_else(|_| "/srv/dowhiz/tasks".to_string()),
             container_pool_name: env::var("RUN_TASK_CONTAINER_POOL_NAME")

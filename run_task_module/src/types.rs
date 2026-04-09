@@ -7,7 +7,6 @@ pub struct RunTaskParams {
     pub use_container: bool,
     pub container_image: String,
     pub container_mode: ContainerMode,
-    pub container_host_root: Option<PathBuf>,
     pub container_workspace_root: String,
     pub container_pool_name: String,
     pub env_passthrough: Vec<String>,

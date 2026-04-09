@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -22,10 +22,22 @@ impl TaskScheduler {
     }
 
     pub fn submit(&self, request: InboundTaskRequest) -> Result<QueuedTask> {
+        self.submit_with_initializer(request, |_| Ok(()))
+    }
+
+    pub fn submit_with_initializer<F>(
+        &self,
+        request: InboundTaskRequest,
+        initializer: F,
+    ) -> Result<QueuedTask>
+    where
+        F: FnOnce(&Path) -> Result<()>,
+    {
         let task_id = Uuid::new_v4().to_string();
         let created_at = Utc::now();
         let layout = plan_workspace(&self.tasks_root, &task_id, &request);
         let manifest = initialize_workspace(&layout, &task_id, created_at, &request)?;
+        initializer(&layout.workspace_dir)?;
 
         let task = QueuedTask {
             id: task_id,
