@@ -27,7 +27,7 @@ impl FileQueue {
     }
 
     pub fn claim_next(&self, worker_id: &str) -> Result<Option<TaskEnvelope>> {
-        let mut entries = self.read_dir_sorted(self.pending_dir())?;
+        let mut entries = self.read_dir_sorted(&self.pending_dir())?;
         while let Some(path) = entries.pop() {
             let file_name = match path.file_name().and_then(|value| value.to_str()) {
                 Some(value) => value.to_string(),
@@ -51,13 +51,13 @@ impl FileQueue {
 
     pub fn complete(&self, mut envelope: TaskEnvelope) -> Result<()> {
         envelope.task.status = TaskStatus::Completed;
-        self.write_terminal(self.completed_dir(), envelope)
+        self.write_terminal(&self.completed_dir(), envelope)
     }
 
     pub fn fail(&self, mut envelope: TaskEnvelope, error: String) -> Result<()> {
         envelope.task.status = TaskStatus::Failed;
         envelope.error = Some(error);
-        self.write_terminal(self.failed_dir(), envelope)
+        self.write_terminal(&self.failed_dir(), envelope)
     }
 
     fn write_terminal(&self, dir: &Path, envelope: TaskEnvelope) -> Result<()> {
