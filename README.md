@@ -1,5 +1,7 @@
 # DoWhiz Core Lite
 
+![DoWhiz Logo](assets/logo.png)
+
 `DoWhiz Core Lite` is a lightweight replica of the core DoWhiz backend architecture.
 It keeps the essential runtime path:
 
