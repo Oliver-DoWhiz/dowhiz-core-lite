@@ -1,45 +1,18 @@
 use std::env;
 use std::fs;
+use std::fs::File;
+use std::io::{BufReader, Read, Write};
 use std::process::Command;
+use std::process::Stdio;
+use std::thread;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::types::PreparedWorkspace;
 
 pub fn run_locally(prepared: &PreparedWorkspace) -> Result<String> {
-    if let Ok(command) = env::var("LOCAL_AGENT_COMMAND") {
-        let mut shell = Command::new("sh");
-        shell
-            .arg("-lc")
-            .arg(command)
-            .current_dir(&prepared.workspace_dir)
-            .env("TASK_WORKSPACE_DIR", &prepared.workspace_dir)
-            .env("TASK_PROMPT_FILE", &prepared.prompt_path)
-            .env("TASK_OUTPUT_FILE", &prepared.stdout_path)
-            .env("TASK_REPLY_HTML_FILE", &prepared.reply_html_path)
-            .env("TASK_REPLY_ATTACHMENTS_DIR", &prepared.reply_attachments_dir)
-            .env("TASK_METADATA_FILE", &prepared.manifest_path);
-
-        if prepared.secrets_env_path.exists() {
-            for (key, value) in read_env_pairs(&prepared.secrets_env_path)? {
-                shell.env(key, value);
-            }
-        }
-
-        let output = shell.output()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-
-        if !output.status.success() {
-            return Err(anyhow!(
-                "local agent command failed: {}",
-                if stderr.is_empty() { "unknown error" } else { &stderr }
-            ));
-        }
-
-        fs::write(&prepared.stdout_path, &stdout)?;
-        return Ok(stdout);
+    if let Some(command) = resolve_agent_command() {
+        return run_command(prepared, &command);
     }
 
     let synthesized = format!(
@@ -48,6 +21,102 @@ pub fn run_locally(prepared: &PreparedWorkspace) -> Result<String> {
     );
     fs::write(&prepared.stdout_path, &synthesized)?;
     Ok(synthesized)
+}
+
+fn run_command(prepared: &PreparedWorkspace, command: &str) -> Result<String> {
+    let mut shell = Command::new("sh");
+    shell
+        .arg("-lc")
+        .arg(command)
+        .current_dir(&prepared.workspace_dir)
+        .env("TASK_WORKSPACE_DIR", &prepared.workspace_dir)
+        .env("TASK_PROMPT_FILE", &prepared.prompt_path)
+        .env("TASK_OUTPUT_FILE", &prepared.stdout_path)
+        .env("TASK_REPLY_HTML_FILE", &prepared.reply_html_path)
+        .env("TASK_REPLY_ATTACHMENTS_DIR", &prepared.reply_attachments_dir)
+        .env("TASK_METADATA_FILE", &prepared.manifest_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if prepared.secrets_env_path.exists() {
+        for (key, value) in read_env_pairs(&prepared.secrets_env_path)? {
+            shell.env(key, value);
+        }
+    }
+
+    let mut child = shell.spawn()?;
+    let stdout = child.stdout.take().context("missing stdout pipe for local agent command")?;
+    let stderr = child.stderr.take().context("missing stderr pipe for local agent command")?;
+
+    let stdout_path = prepared.stdout_path.clone();
+    let stdout_handle = thread::spawn(move || -> Result<Vec<u8>> {
+        let mut reader = BufReader::new(stdout);
+        let mut file = File::create(stdout_path)?;
+        let mut collected = Vec::new();
+        let mut chunk = [0_u8; 4096];
+
+        loop {
+            let read = reader.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            file.write_all(&chunk[..read])?;
+            file.flush()?;
+            collected.extend_from_slice(&chunk[..read]);
+        }
+
+        Ok(collected)
+    });
+
+    let stderr_handle = thread::spawn(move || -> Result<Vec<u8>> {
+        let mut reader = BufReader::new(stderr);
+        let mut collected = Vec::new();
+        reader.read_to_end(&mut collected)?;
+        Ok(collected)
+    });
+
+    let status = child.wait()?;
+    let stdout = stdout_handle
+        .join()
+        .map_err(|_| anyhow!("failed to join stdout reader thread"))??;
+    let stderr = stderr_handle
+        .join()
+        .map_err(|_| anyhow!("failed to join stderr reader thread"))??;
+
+    let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+
+    if !status.success() {
+        return Err(anyhow!(
+            "local agent command failed: {}",
+            if stderr.is_empty() { "unknown error" } else { &stderr }
+        ));
+    }
+
+    Ok(stdout)
+}
+
+fn resolve_agent_command() -> Option<String> {
+    if let Ok(command) = env::var("LOCAL_AGENT_COMMAND") {
+        let trimmed = command.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if command_exists("codex") {
+        return Some("codex exec --input-file \"$TASK_PROMPT_FILE\"".to_string());
+    }
+
+    None
+}
+
+fn command_exists(binary: &str) -> bool {
+    let Some(path) = env::var_os("PATH") else {
+        return false;
+    };
+
+    env::split_paths(&path).any(|dir| dir.join(binary).is_file())
 }
 
 fn read_env_pairs(path: &std::path::Path) -> Result<Vec<(String, String)>> {

@@ -4,5 +4,6 @@ pub mod models;
 pub mod queue;
 pub mod scheduler;
 pub mod service;
+pub mod task_inspector;
 pub mod worker;
 pub mod workspace_registry;

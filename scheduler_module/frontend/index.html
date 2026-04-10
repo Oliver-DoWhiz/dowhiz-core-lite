@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DoWhiz Core Lite Frontend</title>
+    <script type="module" src="/main.js"></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <p class="eyebrow">DoWhiz Core Lite</p>
+        <h1>Frontend test bench for live task runs.</h1>
+        <p class="hero-copy">
+          Submit a JSON-backed task, poll the Rust gateway, and watch the Codex
+          output accumulate while the worker is still running.
+        </p>
+      </header>
+
+      <main class="layout">
+        <section class="panel panel-form">
+          <div class="panel-heading">
+            <p class="panel-kicker">Request</p>
+            <h2>Compose a task</h2>
+          </div>
+
+          <form id="task-form" class="task-form">
+            <label>
+              Customer email
+              <input id="customer-email" name="customerEmail" type="email" value="dtang04@uchicago.edu" required />
+            </label>
+
+            <label>
+              Reply-to
+              <input id="reply-to" name="replyTo" type="email" value="dtang04@uchicago.edu" />
+            </label>
+
+            <label>
+              Subject
+              <input id="subject" name="subject" type="text" value="Frontend proof of concept" required />
+            </label>
+
+            <label>
+              Prompt
+              <textarea id="prompt" name="prompt" rows="9" required>Read the incoming request, complete the task, and draft the reply email. Explain the result clearly.</textarea>
+            </label>
+
+            <div class="form-actions">
+              <button id="run-button" type="submit">Run task</button>
+              <p id="submit-state" class="muted">Waiting for a new request.</p>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel panel-preview">
+          <div class="panel-heading">
+            <p class="panel-kicker">Transport</p>
+            <h2>Serialized JSON payload</h2>
+          </div>
+          <pre id="payload-preview" class="code-block"></pre>
+        </section>
+
+        <section class="panel panel-status">
+          <div class="panel-heading">
+            <p class="panel-kicker">Polling</p>
+            <h2>Gateway task status</h2>
+          </div>
+
+          <div class="status-grid">
+            <div>
+              <span class="label">Task ID</span>
+              <p id="task-id" class="value">Not started</p>
+            </div>
+            <div>
+              <span class="label">State</span>
+              <p id="task-status" class="value">idle</p>
+            </div>
+            <div>
+              <span class="label">Server pickup</span>
+              <p id="task-claimed" class="value">No</p>
+            </div>
+            <div>
+              <span class="label">Last poll</span>
+              <p id="last-poll" class="value">Never</p>
+            </div>
+          </div>
+
+          <p id="task-error" class="error-text" hidden></p>
+        </section>
+
+        <section class="panel panel-stream">
+          <div class="panel-heading">
+            <p class="panel-kicker">Live output</p>
+            <h2>Codex stream</h2>
+          </div>
+          <pre id="stdout-stream" class="code-block code-block-lg">Waiting for task output.</pre>
+        </section>
+
+        <section class="panel panel-reply">
+          <div class="panel-heading">
+            <p class="panel-kicker">Reply draft</p>
+            <h2>Rendered HTML</h2>
+          </div>
+          <iframe id="reply-frame" title="Reply draft preview"></iframe>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
