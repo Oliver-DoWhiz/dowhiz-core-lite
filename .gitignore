@@ -2,3 +2,5 @@
 /.workspace
 /.env
 /.DS_Store
+/scheduler_module/frontend/node_modules
+/scheduler_module/frontend/dist

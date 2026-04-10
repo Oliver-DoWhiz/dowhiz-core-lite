@@ -9,6 +9,7 @@ axum = { version = "0.7", features = ["json"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"
 run_task_module = { path = "../run_task_module" }
 send_emails_module = { path = "../send_emails_module" }
 serde = { version = "1", features = ["derive"] }

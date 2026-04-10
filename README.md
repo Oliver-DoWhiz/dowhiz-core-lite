@@ -42,10 +42,18 @@ need to be. This repo demonstrates a trimmed architecture with:
 
 ```bash
 cp .env.example .env
+```
+
+Set `OPENAI_API_KEY` in `.env`. If the `codex` CLI is installed locally, the worker
+will now invoke it automatically without requiring `LOCAL_AGENT_COMMAND`.
+
+Start the worker:
+
+```bash
 cargo run -p scheduler_module --bin rust_service
 ```
 
-In another terminal:
+In another terminal, start the gateway:
 
 ```bash
 cargo run -p scheduler_module --bin inbound_gateway
@@ -65,6 +73,30 @@ curl -X POST http://127.0.0.1:9100/tasks \
 ```
 
 The worker writes per-task artifacts under `dowhiz-core-lite/.workspace/tasks/`.
+
+## Frontend proof of concept
+
+The repo now includes a small JavaScript frontend under
+`scheduler_module/frontend/`. It submits JSON to `POST /tasks` and polls
+`GET /tasks/{id}` once per second so you can see the queued state, worker pickup,
+streamed stdout, and final HTML reply draft.
+
+Run it locally with npm:
+
+```bash
+cd scheduler_module/frontend
+npm install
+npm run dev
+```
+
+Then open `https://127.0.0.1:4173`.
+
+Notes:
+
+- The Vite dev server uses local HTTPS via `@vitejs/plugin-basic-ssl`.
+- API requests are proxied to the Rust gateway on `http://127.0.0.1:9100`.
+- If `codex` is not installed locally, the worker falls back to the existing
+  synthesized stub response instead of a live model stream.
 
 For multi-tenant requests, the scheduler now partitions workspaces as:
 
