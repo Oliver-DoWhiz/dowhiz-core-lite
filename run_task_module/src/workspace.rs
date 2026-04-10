@@ -8,6 +8,7 @@ use crate::types::PreparedWorkspace;
 
 pub fn prepare_workspace(workspace_dir: &Path, prompt: &str) -> Result<PreparedWorkspace> {
     fs::create_dir_all(workspace_dir)?;
+    let workspace_dir = workspace_dir.canonicalize()?;
 
     let prompt_path = workspace_dir.join("task_prompt.txt");
     let system_prompt_path = workspace_dir.join(SYSTEM_PROMPT_FILE_NAME);
