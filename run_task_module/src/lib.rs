@@ -37,13 +37,22 @@ pub fn run_task(params: &RunTaskParams) -> Result<RunTaskOutput> {
         local::run_locally(&prepared)?
     };
 
-    workspace::write_reply_html(&prepared.reply_html_path, &stdout)?;
-    tracing::info!(
-        workspace_dir = %prepared.workspace_dir.display(),
-        reply_html_path = %prepared.reply_html_path.display(),
-        stdout_bytes = stdout.len(),
-        "wrote reply HTML artifact"
-    );
+    // Only write fallback HTML if Codex didn't write the reply file
+    if !workspace::has_reply_content(&prepared.reply_html_path) {
+        workspace::write_reply_html(&prepared.reply_html_path, &stdout)?;
+        tracing::info!(
+            workspace_dir = %prepared.workspace_dir.display(),
+            reply_html_path = %prepared.reply_html_path.display(),
+            stdout_bytes = stdout.len(),
+            "wrote fallback reply HTML from stdout"
+        );
+    } else {
+        tracing::info!(
+            workspace_dir = %prepared.workspace_dir.display(),
+            reply_html_path = %prepared.reply_html_path.display(),
+            "codex wrote reply HTML directly, skipping fallback"
+        );
+    }
 
     Ok(RunTaskOutput {
         reply_html_path: prepared.reply_html_path,

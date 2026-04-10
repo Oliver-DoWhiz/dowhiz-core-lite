@@ -62,6 +62,16 @@ mod tests {
     }
 }
 
+pub fn has_reply_content(path: &Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    match fs::read_to_string(path) {
+        Ok(content) => !content.trim().is_empty(),
+        Err(_) => false,
+    }
+}
+
 pub fn write_reply_html(path: &Path, stdout: &str) -> Result<()> {
     let html = format!(
         "<html><body><h1>Task Result</h1><pre>{}</pre></body></html>",
