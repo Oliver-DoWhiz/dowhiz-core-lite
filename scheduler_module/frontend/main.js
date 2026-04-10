@@ -3,6 +3,10 @@ import "./styles.css";
 const form = document.querySelector("#task-form");
 const payloadPreview = document.querySelector("#payload-preview");
 const submitState = document.querySelector("#submit-state");
+const attachmentInput = document.querySelector("#attachment-input");
+const attachmentStatus = document.querySelector("#attachment-status");
+const attachmentList = document.querySelector("#attachment-list");
+const clearAttachmentsButton = document.querySelector("#clear-attachments");
 const taskId = document.querySelector("#task-id");
 const taskStatus = document.querySelector("#task-status");
 const taskClaimed = document.querySelector("#task-claimed");
@@ -20,6 +24,7 @@ const fieldSelectors = [
 ];
 
 let pollHandle = null;
+let attachmentRefs = [];
 
 function buildPayload() {
   const customerEmail = document.querySelector("#customer-email").value.trim();
@@ -33,11 +38,75 @@ function buildPayload() {
     prompt,
     channel: "email",
     reply_to: replyTo,
+    attachment_refs: attachmentRefs,
   };
 }
 
 function renderPayloadPreview() {
   payloadPreview.textContent = JSON.stringify(buildPayload(), null, 2);
+}
+
+function renderAttachmentList() {
+  attachmentList.innerHTML = "";
+
+  if (attachmentRefs.length === 0) {
+    attachmentStatus.textContent = "No attachments uploaded.";
+    return;
+  }
+
+  attachmentStatus.textContent = `${attachmentRefs.length} attachment${attachmentRefs.length === 1 ? "" : "s"} staged in the gateway.`;
+  for (const attachment of attachmentRefs) {
+    const item = document.createElement("li");
+    item.className = "attachment-pill";
+    item.textContent = `${attachment.file_name} (${formatBytes(attachment.size_bytes)})`;
+    attachmentList.appendChild(item);
+  }
+}
+
+async function uploadSelectedFiles(event) {
+  const files = Array.from(event.target.files || []);
+  if (files.length === 0) {
+    return;
+  }
+
+  attachmentInput.disabled = true;
+  clearAttachmentsButton.disabled = true;
+  attachmentStatus.textContent = `Uploading ${files.length} file${files.length === 1 ? "" : "s"}...`;
+
+  try {
+    const body = new FormData();
+    for (const file of files) {
+      body.append("file", file, file.name);
+    }
+
+    const response = await fetch("/uploads", {
+      method: "POST",
+      body,
+    });
+
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+
+    const result = await response.json();
+    attachmentRefs = attachmentRefs.concat(result.attachments || []);
+    renderAttachmentList();
+    renderPayloadPreview();
+  } catch (error) {
+    showError(error instanceof Error ? error.message : String(error));
+    attachmentStatus.textContent = "Attachment upload failed.";
+  } finally {
+    attachmentInput.value = "";
+    attachmentInput.disabled = false;
+    clearAttachmentsButton.disabled = attachmentRefs.length === 0;
+  }
+}
+
+function clearAttachments() {
+  attachmentRefs = [];
+  renderAttachmentList();
+  renderPayloadPreview();
+  clearAttachmentsButton.disabled = true;
 }
 
 async function submitTask(event) {
@@ -144,9 +213,23 @@ function timestamp() {
   return new Date().toLocaleTimeString();
 }
 
+function formatBytes(size) {
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 for (const selector of fieldSelectors) {
   document.querySelector(selector).addEventListener("input", renderPayloadPreview);
 }
 
+attachmentInput.addEventListener("change", uploadSelectedFiles);
+clearAttachmentsButton.addEventListener("click", clearAttachments);
 form.addEventListener("submit", submitTask);
+clearAttachmentsButton.disabled = true;
+renderAttachmentList();
 renderPayloadPreview();

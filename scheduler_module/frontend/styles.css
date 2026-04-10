@@ -160,6 +160,80 @@ body::before {
   box-shadow: 0 0 0 4px rgba(164, 74, 47, 0.12);
 }
 
+.attachment-card {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid rgba(24, 33, 30, 0.1);
+  border-radius: 18px;
+  background: rgba(255, 250, 240, 0.75);
+}
+
+.attachment-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.attachment-copy {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.file-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(24, 33, 30, 0.08);
+  color: var(--ink);
+  cursor: pointer;
+  font-weight: 700;
+  padding: 12px 18px;
+}
+
+.file-picker input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.ghost-button {
+  background: rgba(24, 33, 30, 0.08);
+  color: var(--ink);
+  box-shadow: none;
+  padding: 10px 16px;
+}
+
+.ghost-button:hover:not(:disabled) {
+  box-shadow: none;
+  transform: translateY(-1px);
+}
+
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.attachment-pill {
+  border: 1px solid rgba(24, 33, 30, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 8px 12px;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
 .form-actions {
   display: flex;
   flex-wrap: wrap;

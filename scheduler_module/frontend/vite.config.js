@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     https: true,
     proxy: {
+      "/uploads": "http://127.0.0.1:9100",
       "/tasks": "http://127.0.0.1:9100",
       "/health": "http://127.0.0.1:9100",
     },

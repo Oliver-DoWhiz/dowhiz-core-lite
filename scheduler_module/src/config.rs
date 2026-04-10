@@ -10,6 +10,8 @@ pub struct GatewayConfig {
     pub port: u16,
     pub queue_root: PathBuf,
     pub tasks_root: PathBuf,
+    pub account_registry_path: PathBuf,
+    pub attachment_upload_root: PathBuf,
 }
 
 impl GatewayConfig {
@@ -22,6 +24,14 @@ impl GatewayConfig {
                 .unwrap_or(9100),
             queue_root: env_path("QUEUE_ROOT", ".workspace/queue"),
             tasks_root: env_path("TASKS_ROOT", ".workspace/tasks"),
+            account_registry_path: env_path(
+                "ACCOUNT_REGISTRY_PATH",
+                ".workspace/account_registry.json",
+            ),
+            attachment_upload_root: env_path(
+                "ATTACHMENT_UPLOAD_ROOT",
+                ".workspace/uploads",
+            ),
         }
     }
 }

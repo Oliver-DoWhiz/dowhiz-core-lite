@@ -193,9 +193,12 @@ Then the gateway can:
 4. Queue the same normalized worker task shape used by email ingress.
 
 If DoWhiz wants to avoid storage URIs in the client request, the same pattern can use
-gateway-issued `upload_id` values instead. The important design choice is the same:
-`POST /tasks` should carry attachment metadata or references, not the file bytes
-themselves.
+gateway-issued `upload_id` values instead. That is now the implemented local POC path:
+`POST /uploads` stages the raw bytes under a local upload root, returns `upload_id`
+refs, and `POST /tasks` carries only those refs. The gateway then copies the staged
+files into `incoming_attachments/` before queueing the task. The important design
+choice is the same: `POST /tasks` should carry attachment metadata or references, not
+the file bytes themselves.
 
 On the frontend side, that means the drag-and-drop area should upload files immediately,
 show the user a pending attachment list, and submit the final task with only those
