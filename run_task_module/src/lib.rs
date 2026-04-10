@@ -1,5 +1,6 @@
 mod container;
 mod local;
+mod prompt;
 mod types;
 mod workspace;
 

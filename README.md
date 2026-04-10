@@ -75,6 +75,75 @@ For multi-tenant requests, the scheduler now partitions workspaces as:
 Each task gets a `workspace_manifest.json` that records the stable workspace key,
 identity URI, memory URI, and credential references needed by downstream workers.
 
+## ACI workspace tree
+
+The production Azure Container Instances runner uses a task workspace with paths like
+these during a Codex run:
+
+```text
+<workspace>/
+  AGENTS.md
+  SOUL.md
+  incoming_email/
+  incoming_attachments/
+  memory/
+  references/
+  reply_email_draft.html
+  reply_email_attachments/
+  .codex/
+  .codex_remote_prompt.txt
+  .run_task_trace/
+  .secrets/
+  scheduler_snapshot.json
+  thread_state.json
+```
+
+- `AGENTS.md`: operator guidance for the agent, including repo conventions.
+- `SOUL.md`: persona and tone instructions.
+- `incoming_email/`: merged inbound request plus raw provider payloads and thread history.
+- `incoming_attachments/`: merged attachment view for the active thread.
+- `memory/`: durable per-user facts that can be reused across runs.
+- `references/`: prior thread artifacts or other saved reference material.
+- `reply_email_draft.html`: final HTML reply that the worker should send.
+- `reply_email_attachments/`: files to attach to the outgoing reply.
+- `.codex/`: Codex home directory, config, logs, and local state inside the container.
+- `.codex_remote_prompt.txt`: the fully assembled top-level prompt that launched Codex.
+- `.run_task_trace/`: runner metadata, prompt snapshots, and execution logs for debugging.
+- `.secrets/`: mounted credentials for supported CLIs and service integrations.
+- `scheduler_snapshot.json`: scheduler-provided state snapshot for this run.
+- `thread_state.json`: normalized thread metadata and routing state.
+
+Some output paths are created during execution instead of being pre-populated by the
+runner. `DoWhiz Core Lite` does not generate every one of those files itself. The host
+runner may inject them.
+
+The repo does guarantee a smaller per-task contract with these well-known paths under
+`.workspace/tasks/<tenant>/<account>/<task-id>/`:
+
+```text
+.workspace/tasks/<tenant>/<account>/<task-id>/
+  task_prompt.txt
+  codex_system_prompt.md
+  workspace_manifest.json
+  incoming_email/
+  incoming_attachments/
+  reply_email_draft.html
+  reply_email_attachments/
+  .task_stdout.log
+  .task_secrets.env
+```
+
+- `task_prompt.txt`: the combined prompt passed to `codex exec`.
+- `codex_system_prompt.md`: the stable system prompt that explains the workspace
+  contract, skill usage, and tool expectations for Codex.
+- `workspace_manifest.json`: scheduler-owned workspace identity and routing metadata.
+- `incoming_email/`: canonical inbound artifacts persisted by the gateway.
+- `incoming_attachments/`: decoded inbound attachments for the active thread.
+- `reply_email_draft.html`: the draft reply produced by the task runner.
+- `reply_email_attachments/`: outbound attachments produced during the task.
+- `.task_stdout.log`: captured stdout from the local or container execution path.
+- `.task_secrets.env`: optional task-scoped secrets that the runner loads for the task.
+
 ## Containerized Codex boundary
 
 `run_task_module` supports a local simulation path and a container path.
@@ -99,6 +168,11 @@ The image now installs `@openai/codex` and the entrypoint writes `~/.codex/confi
 from the environment. Use `OPENAI_API_KEY` for the default provider, or supply the
 `AZURE_OPENAI_*` variables to normalize an Azure-compatible endpoint into the same
 runtime contract.
+
+The repo-level Codex system prompt lives at
+`run_task_module/prompts/codex_system_prompt.md`. `run_task_module` writes that file
+into every task workspace as `codex_system_prompt.md` and prepends it to
+`task_prompt.txt` so the runtime instructions stay explicit and versioned.
 
 If a task needs per-user credentials such as a workspace SAS token, write them into
 `<workspace>/.task_secrets.env` right before execution or pass specific host variables
