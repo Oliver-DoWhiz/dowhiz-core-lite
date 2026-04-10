@@ -64,7 +64,7 @@ curl -X POST http://127.0.0.1:9100/tasks \
   }'
 ```
 
-The worker writes per-task artifacts under `.workspace/tasks/`.
+The worker writes per-task artifacts under `dowhiz-core-lite/.workspace/tasks/`.
 
 For multi-tenant requests, the scheduler now partitions workspaces as:
 
