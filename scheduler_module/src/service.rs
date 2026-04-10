@@ -61,11 +61,20 @@ async fn create_task(
     State(state): State<AppState>,
     Json(request): Json<InboundTaskRequest>,
 ) -> std::result::Result<Json<QueuedTask>, (StatusCode, String)> {
-    state
-        .scheduler
-        .submit(request)
-        .map(Json)
-        .map_err(internal_error)
+    tracing::info!(
+        channel = %request.channel,
+        customer_email = %request.customer_email,
+        subject = %request.subject,
+        "received direct task submission"
+    );
+    let queued = state.scheduler.submit(request).map_err(internal_error)?;
+    tracing::info!(
+        task_id = %queued.id,
+        workspace_key = %queued.workspace_key,
+        workspace_dir = %queued.workspace_dir,
+        "queued direct task submission"
+    );
+    Ok(Json(queued))
 }
 
 async fn get_task(
@@ -82,13 +91,34 @@ async fn receive_postmark_inbound(
     State(state): State<AppState>,
     Json(payload): Json<PostmarkInboundPayload>,
 ) -> std::result::Result<Json<QueuedTask>, (StatusCode, String)> {
+    tracing::info!(
+        from = %payload.from,
+        subject = %payload.subject,
+        attachment_count = payload.attachments.len(),
+        message_id = %payload.message_id,
+        "received inbound Postmark webhook"
+    );
     let request = task_request_from_postmark(&payload);
+    tracing::debug!(
+        customer_email = %request.customer_email,
+        reply_to = %request.reply_to,
+        channel = %request.channel,
+        message_id = %payload.message_id,
+        "normalized inbound Postmark payload into task request"
+    );
     let queued = state
         .scheduler
         .submit_with_initializer(request.clone(), |workspace_dir| {
             persist_postmark_inbound_artifacts(workspace_dir, &payload, &request)
         })
         .map_err(internal_error)?;
+    tracing::info!(
+        task_id = %queued.id,
+        workspace_key = %queued.workspace_key,
+        workspace_dir = %queued.workspace_dir,
+        message_id = %payload.message_id,
+        "queued inbound Postmark task"
+    );
 
     Ok(Json(queued))
 }

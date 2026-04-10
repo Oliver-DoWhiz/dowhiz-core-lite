@@ -79,6 +79,14 @@ pub fn persist_postmark_inbound_artifacts(
     let email_dir = workspace_dir.join("incoming_email");
     let attachments_dir = workspace_dir.join("incoming_attachments");
 
+    tracing::info!(
+        workspace_dir = %workspace_dir.display(),
+        customer_email = %request.customer_email,
+        message_id = %payload.message_id,
+        attachment_count = payload.attachments.len(),
+        "persisting inbound Postmark artifacts into task workspace"
+    );
+
     fs::create_dir_all(&email_dir)?;
     fs::create_dir_all(&attachments_dir)?;
 
@@ -108,6 +116,13 @@ pub fn persist_postmark_inbound_artifacts(
             .decode(attachment.content.as_bytes())
             .map_err(|err| anyhow!("failed to decode inbound attachment {}: {}", file_name, err))?;
         fs::write(attachments_dir.join(&file_name), bytes)?;
+        tracing::debug!(
+            workspace_dir = %workspace_dir.display(),
+            attachment_name = %file_name,
+            content_type = %attachment.content_type,
+            content_length = attachment.content_length,
+            "decoded inbound attachment into task workspace"
+        );
     }
 
     fs::write(
@@ -116,6 +131,13 @@ pub fn persist_postmark_inbound_artifacts(
             attachment_names,
         })?,
     )?;
+
+    tracing::info!(
+        workspace_dir = %workspace_dir.display(),
+        email_dir = %email_dir.display(),
+        attachments_dir = %attachments_dir.display(),
+        "finished persisting inbound Postmark artifacts"
+    );
 
     Ok(())
 }

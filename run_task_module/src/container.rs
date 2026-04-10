@@ -13,17 +13,38 @@ use crate::types::{ContainerMode, PreparedWorkspace, RunTaskParams};
 const DEFAULT_WORKSPACE_MOUNT: &str = "/workspace";
 
 pub fn run_in_container(prepared: &PreparedWorkspace, params: &RunTaskParams) -> Result<String> {
+    tracing::info!(
+        workspace_dir = %prepared.workspace_dir.display(),
+        container_mode = %container_mode_label(params.container_mode),
+        container_image = %params.container_image,
+        "starting container task execution"
+    );
     match params.container_mode {
         ContainerMode::OneShot => run_one_shot(prepared, params)?,
         ContainerMode::WarmPool => run_warm_pool(prepared, params)?,
     }
 
     let stdout = fs::read_to_string(&prepared.stdout_path)?;
+    tracing::info!(
+        workspace_dir = %prepared.workspace_dir.display(),
+        stdout_path = %prepared.stdout_path.display(),
+        stdout_bytes = stdout.len(),
+        "loaded container task stdout from workspace"
+    );
     Ok(stdout)
 }
 
 fn run_one_shot(prepared: &PreparedWorkspace, params: &RunTaskParams) -> Result<()> {
     let workspace = canonicalize_path(&prepared.workspace_dir)?;
+    let secret_env = read_env_pairs(&prepared.secrets_env_path)?;
+    tracing::info!(
+        workspace_dir = %workspace.display(),
+        container_image = %params.container_image,
+        env_passthrough = params.env_passthrough.len(),
+        secret_env_vars = secret_env.len(),
+        mount_target = DEFAULT_WORKSPACE_MOUNT,
+        "launching one-shot container with workspace bind mount"
+    );
     let mut command = Command::new("docker");
     command
         .arg("run")
@@ -32,7 +53,7 @@ fn run_one_shot(prepared: &PreparedWorkspace, params: &RunTaskParams) -> Result<
         .arg(format!("{}:{}", workspace.display(), DEFAULT_WORKSPACE_MOUNT));
 
     append_passthrough_env(&mut command, &params.env_passthrough);
-    append_secret_env(&mut command, &prepared.secrets_env_path)?;
+    append_secret_env_pairs(&mut command, &secret_env);
     append_task_env(
         &mut command,
         DEFAULT_WORKSPACE_MOUNT,
@@ -41,6 +62,11 @@ fn run_one_shot(prepared: &PreparedWorkspace, params: &RunTaskParams) -> Result<
 
     let output = command.arg(&params.container_image).output()?;
     ensure_success(output.status.success(), &output.stderr, "container runner")?;
+    tracing::info!(
+        workspace_dir = %workspace.display(),
+        container_image = %params.container_image,
+        "one-shot container execution finished"
+    );
     Ok(())
 }
 
@@ -56,8 +82,20 @@ fn run_warm_pool(prepared: &PreparedWorkspace, params: &RunTaskParams) -> Result
 
     let container_workspace_root = normalize_container_root(&params.container_workspace_root);
     let container_workspace = join_container_path(&container_workspace_root, &relative_workspace);
+    tracing::info!(
+        workspace_dir = %workspace.display(),
+        pool_name = %pool_name,
+        container_workspace = %container_workspace,
+        "starting warm-pool container execution"
+    );
 
     sync_workspace_to_pool(&pool_name, &workspace, &container_workspace)?;
+    tracing::info!(
+        workspace_dir = %workspace.display(),
+        pool_name = %pool_name,
+        container_workspace = %container_workspace,
+        "uploaded task workspace into warm-pool container"
+    );
 
     let exec_output = run_pool_exec(
         &pool_name,
@@ -70,13 +108,30 @@ fn run_warm_pool(prepared: &PreparedWorkspace, params: &RunTaskParams) -> Result
     let cleanup_result = cleanup_container_workspace(&pool_name, &container_workspace);
 
     sync_back_result?;
+    tracing::info!(
+        workspace_dir = %workspace.display(),
+        pool_name = %pool_name,
+        container_workspace = %container_workspace,
+        "synced task workspace back from warm-pool container"
+    );
     cleanup_result?;
+    tracing::info!(
+        workspace_dir = %workspace.display(),
+        pool_name = %pool_name,
+        container_workspace = %container_workspace,
+        "cleaned warm-pool container workspace"
+    );
     let exec_output = exec_output?;
     ensure_success(
         exec_output.status.success(),
         &exec_output.stderr,
         "warm container exec",
     )?;
+    tracing::info!(
+        workspace_dir = %workspace.display(),
+        pool_name = %pool_name,
+        "warm-pool container execution finished"
+    );
 
     Ok(())
 }
@@ -88,13 +143,30 @@ fn run_pool_exec(
     prepared: &PreparedWorkspace,
     params: &RunTaskParams,
 ) -> Result<std::process::Output> {
+    let secret_env = read_env_pairs(&prepared.secrets_env_path)?;
+    tracing::info!(
+        workspace_dir = %prepared.workspace_dir.display(),
+        pool_name = pool_name,
+        container_workspace = container_workspace,
+        env_passthrough = params.env_passthrough.len(),
+        secret_env_vars = secret_env.len(),
+        "executing task inside warm-pool container"
+    );
     let mut command = Command::new("docker");
     command.arg("exec");
     append_passthrough_env(&mut command, &params.env_passthrough);
-    append_secret_env(&mut command, &prepared.secrets_env_path)?;
+    append_secret_env_pairs(&mut command, &secret_env);
     append_task_env(&mut command, container_workspace, container_workspace_root);
     command.arg(pool_name).arg("/app/exec_codex.sh");
-    Ok(command.output()?)
+    let output = command.output()?;
+    tracing::info!(
+        workspace_dir = %prepared.workspace_dir.display(),
+        pool_name = pool_name,
+        exit_success = output.status.success(),
+        stderr_bytes = output.stderr.len(),
+        "warm-pool container exec finished"
+    );
+    Ok(output)
 }
 
 fn ensure_pool_container(pool_name: &str, params: &RunTaskParams) -> Result<()> {
@@ -106,6 +178,10 @@ fn ensure_pool_container(pool_name: &str, params: &RunTaskParams) -> Result<()> 
         .output()?;
 
     if inspect.status.success() && String::from_utf8_lossy(&inspect.stdout).trim() == "true" {
+        tracing::debug!(
+            pool_name = pool_name,
+            "warm pool container already running"
+        );
         return Ok(());
     }
 
@@ -133,6 +209,11 @@ fn ensure_pool_container(pool_name: &str, params: &RunTaskParams) -> Result<()> 
         &output.stderr,
         "warm pool bootstrap",
     )?;
+    tracing::info!(
+        pool_name = pool_name,
+        container_image = %params.container_image,
+        "started warm pool container"
+    );
 
     let container_root = normalize_container_root(&params.container_workspace_root);
     ensure_container_dir(pool_name, &container_root)?;
@@ -140,6 +221,12 @@ fn ensure_pool_container(pool_name: &str, params: &RunTaskParams) -> Result<()> 
 }
 
 fn sync_workspace_to_pool(pool_name: &str, workspace: &Path, container_workspace: &str) -> Result<()> {
+    tracing::debug!(
+        pool_name = pool_name,
+        workspace_dir = %workspace.display(),
+        container_workspace = container_workspace,
+        "syncing task workspace into warm pool container"
+    );
     let parent = Path::new(container_workspace)
         .parent()
         .ok_or_else(|| anyhow!("container workspace has no parent: {}", container_workspace))?;
@@ -163,6 +250,12 @@ fn sync_workspace_to_pool(pool_name: &str, workspace: &Path, container_workspace
 }
 
 fn sync_workspace_from_pool(pool_name: &str, container_workspace: &str, workspace: &Path) -> Result<()> {
+    tracing::debug!(
+        pool_name = pool_name,
+        workspace_dir = %workspace.display(),
+        container_workspace = container_workspace,
+        "syncing task workspace back from warm pool container"
+    );
     fs::create_dir_all(workspace)?;
     let source = format!("{}:{}/.", pool_name, container_workspace);
     let output = Command::new("docker")
@@ -195,6 +288,11 @@ fn ensure_container_dir(pool_name: &str, directory: &str) -> Result<()> {
 }
 
 fn cleanup_container_workspace(pool_name: &str, container_workspace: &str) -> Result<()> {
+    tracing::debug!(
+        pool_name = pool_name,
+        container_workspace = container_workspace,
+        "cleaning warm pool workspace"
+    );
     let output = Command::new("docker")
         .arg("exec")
         .arg(pool_name)
@@ -243,10 +341,14 @@ fn append_passthrough_env(command: &mut Command, names: &[String]) {
 }
 
 fn append_secret_env(command: &mut Command, path: &Path) -> Result<()> {
-    for (key, value) in read_env_pairs(path)? {
+    append_secret_env_pairs(command, &read_env_pairs(path)?);
+    Ok(())
+}
+
+fn append_secret_env_pairs(command: &mut Command, vars: &[(String, String)]) {
+    for (key, value) in vars {
         command.arg("-e").arg(format!("{}={}", key, value));
     }
-    Ok(())
 }
 
 fn read_env_pairs(path: &Path) -> Result<Vec<(String, String)>> {
@@ -316,6 +418,13 @@ fn normalize_container_root(value: &str) -> String {
         "/srv/dowhiz/tasks".to_string()
     } else {
         trimmed.trim_end_matches('/').to_string()
+    }
+}
+
+fn container_mode_label(mode: ContainerMode) -> &'static str {
+    match mode {
+        ContainerMode::OneShot => "one_shot",
+        ContainerMode::WarmPool => "warm_pool",
     }
 }
 

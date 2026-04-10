@@ -37,7 +37,20 @@ impl TaskScheduler {
         let created_at = Utc::now();
         let layout = plan_workspace(&self.tasks_root, &task_id, &request);
         let manifest = initialize_workspace(&layout, &task_id, created_at, &request)?;
+        tracing::info!(
+            task_id = %task_id,
+            workspace_key = %manifest.workspace_key,
+            workspace_dir = %manifest.workspace_dir,
+            channel = %request.channel,
+            customer_email = %request.customer_email,
+            "initialized task workspace"
+        );
         initializer(&layout.workspace_dir)?;
+        tracing::debug!(
+            task_id = %task_id,
+            workspace_dir = %layout.workspace_dir.display(),
+            "task workspace initializer completed"
+        );
 
         let task = QueuedTask {
             id: task_id,

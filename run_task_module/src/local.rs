@@ -12,6 +12,11 @@ use crate::types::PreparedWorkspace;
 
 pub fn run_locally(prepared: &PreparedWorkspace) -> Result<String> {
     if let Some(command) = resolve_agent_command() {
+        tracing::info!(
+            workspace_dir = %prepared.workspace_dir.display(),
+            command = %command,
+            "resolved local agent command"
+        );
         return run_command(prepared, &command);
     }
 
@@ -20,10 +25,30 @@ pub fn run_locally(prepared: &PreparedWorkspace) -> Result<String> {
         prepared.prompt
     );
     fs::write(&prepared.stdout_path, &synthesized)?;
+    tracing::info!(
+        workspace_dir = %prepared.workspace_dir.display(),
+        stdout_path = %prepared.stdout_path.display(),
+        "no local agent command available; wrote synthesized task output"
+    );
     Ok(synthesized)
 }
 
 fn run_command(prepared: &PreparedWorkspace, command: &str) -> Result<String> {
+    let secret_env = if prepared.secrets_env_path.exists() {
+        read_env_pairs(&prepared.secrets_env_path)?
+    } else {
+        Vec::new()
+    };
+
+    tracing::info!(
+        workspace_dir = %prepared.workspace_dir.display(),
+        command = %command,
+        prompt_path = %prepared.prompt_path.display(),
+        output_path = %prepared.stdout_path.display(),
+        reply_html_path = %prepared.reply_html_path.display(),
+        secret_env_vars = secret_env.len(),
+        "starting local agent process"
+    );
     let mut shell = Command::new("sh");
     shell
         .arg("-lc")
@@ -38,10 +63,8 @@ fn run_command(prepared: &PreparedWorkspace, command: &str) -> Result<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    if prepared.secrets_env_path.exists() {
-        for (key, value) in read_env_pairs(&prepared.secrets_env_path)? {
-            shell.env(key, value);
-        }
+    for (key, value) in secret_env {
+        shell.env(key, value);
     }
 
     let mut child = shell.spawn()?;
@@ -93,6 +116,13 @@ fn run_command(prepared: &PreparedWorkspace, command: &str) -> Result<String> {
         ));
     }
 
+    tracing::info!(
+        workspace_dir = %prepared.workspace_dir.display(),
+        exit_code = status.code().unwrap_or_default(),
+        stdout_bytes = stdout.len(),
+        stderr_bytes = stderr.len(),
+        "local agent process completed"
+    );
     Ok(stdout)
 }
 
