@@ -40,7 +40,7 @@ pub async fn run_gateway(config: GatewayConfig) -> Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/tasks", post(create_task))
-        .route("/tasks/{task_id}", get(get_task))
+        .route("/tasks/:task_id", get(get_task))
         .route("/webhooks/postmark/inbound", post(receive_postmark_inbound))
         .with_state(state);
 
