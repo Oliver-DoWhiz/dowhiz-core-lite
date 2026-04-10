@@ -36,9 +36,12 @@ pub fn run_in_container(prepared: &PreparedWorkspace, params: &RunTaskParams) ->
 
 fn run_one_shot(prepared: &PreparedWorkspace, params: &RunTaskParams) -> Result<()> {
     let workspace = canonicalize_path(&prepared.workspace_dir)?;
+    let secret_env = read_env_pairs(&prepared.secrets_env_path)?;
     tracing::info!(
         workspace_dir = %workspace.display(),
         container_image = %params.container_image,
+        env_passthrough = params.env_passthrough.len(),
+        secret_env_vars = secret_env.len(),
         mount_target = DEFAULT_WORKSPACE_MOUNT,
         "launching one-shot container with workspace bind mount"
     );
@@ -50,7 +53,7 @@ fn run_one_shot(prepared: &PreparedWorkspace, params: &RunTaskParams) -> Result<
         .arg(format!("{}:{}", workspace.display(), DEFAULT_WORKSPACE_MOUNT));
 
     append_passthrough_env(&mut command, &params.env_passthrough);
-    append_secret_env(&mut command, &prepared.secrets_env_path)?;
+    append_secret_env_pairs(&mut command, &secret_env);
     append_task_env(
         &mut command,
         DEFAULT_WORKSPACE_MOUNT,
@@ -87,6 +90,12 @@ fn run_warm_pool(prepared: &PreparedWorkspace, params: &RunTaskParams) -> Result
     );
 
     sync_workspace_to_pool(&pool_name, &workspace, &container_workspace)?;
+    tracing::info!(
+        workspace_dir = %workspace.display(),
+        pool_name = %pool_name,
+        container_workspace = %container_workspace,
+        "uploaded task workspace into warm-pool container"
+    );
 
     let exec_output = run_pool_exec(
         &pool_name,
@@ -99,7 +108,19 @@ fn run_warm_pool(prepared: &PreparedWorkspace, params: &RunTaskParams) -> Result
     let cleanup_result = cleanup_container_workspace(&pool_name, &container_workspace);
 
     sync_back_result?;
+    tracing::info!(
+        workspace_dir = %workspace.display(),
+        pool_name = %pool_name,
+        container_workspace = %container_workspace,
+        "synced task workspace back from warm-pool container"
+    );
     cleanup_result?;
+    tracing::info!(
+        workspace_dir = %workspace.display(),
+        pool_name = %pool_name,
+        container_workspace = %container_workspace,
+        "cleaned warm-pool container workspace"
+    );
     let exec_output = exec_output?;
     ensure_success(
         exec_output.status.success(),
@@ -122,13 +143,30 @@ fn run_pool_exec(
     prepared: &PreparedWorkspace,
     params: &RunTaskParams,
 ) -> Result<std::process::Output> {
+    let secret_env = read_env_pairs(&prepared.secrets_env_path)?;
+    tracing::info!(
+        workspace_dir = %prepared.workspace_dir.display(),
+        pool_name = pool_name,
+        container_workspace = container_workspace,
+        env_passthrough = params.env_passthrough.len(),
+        secret_env_vars = secret_env.len(),
+        "executing task inside warm-pool container"
+    );
     let mut command = Command::new("docker");
     command.arg("exec");
     append_passthrough_env(&mut command, &params.env_passthrough);
-    append_secret_env(&mut command, &prepared.secrets_env_path)?;
+    append_secret_env_pairs(&mut command, &secret_env);
     append_task_env(&mut command, container_workspace, container_workspace_root);
     command.arg(pool_name).arg("/app/exec_codex.sh");
-    Ok(command.output()?)
+    let output = command.output()?;
+    tracing::info!(
+        workspace_dir = %prepared.workspace_dir.display(),
+        pool_name = pool_name,
+        exit_success = output.status.success(),
+        stderr_bytes = output.stderr.len(),
+        "warm-pool container exec finished"
+    );
+    Ok(output)
 }
 
 fn ensure_pool_container(pool_name: &str, params: &RunTaskParams) -> Result<()> {
@@ -303,10 +341,14 @@ fn append_passthrough_env(command: &mut Command, names: &[String]) {
 }
 
 fn append_secret_env(command: &mut Command, path: &Path) -> Result<()> {
-    for (key, value) in read_env_pairs(path)? {
+    append_secret_env_pairs(command, &read_env_pairs(path)?);
+    Ok(())
+}
+
+fn append_secret_env_pairs(command: &mut Command, vars: &[(String, String)]) {
+    for (key, value) in vars {
         command.arg("-e").arg(format!("{}={}", key, value));
     }
-    Ok(())
 }
 
 fn read_env_pairs(path: &Path) -> Result<Vec<(String, String)>> {

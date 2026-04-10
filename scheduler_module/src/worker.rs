@@ -38,6 +38,11 @@ impl WorkerService {
 
     pub async fn process_once(&self) -> Result<bool> {
         let Some(envelope) = self.queue.claim_next(&self.worker_id)? else {
+            tracing::debug!(
+                worker_id = %self.worker_id,
+                poll_interval_ms = self.config.poll_interval.as_millis(),
+                "no queued task available for worker poll"
+            );
             return Ok(false);
         };
 
@@ -49,7 +54,12 @@ impl WorkerService {
             execution_mode = %execution_mode_label(self.config.use_container, self.config.container_mode),
             "starting worker task processing"
         );
-        match self.process_workspace(&workspace_dir, &envelope.task.request.prompt) {
+        match self.process_workspace(
+            &envelope.task.id,
+            &envelope.task.workspace_key,
+            &workspace_dir,
+            &envelope.task.request.prompt,
+        ) {
             Ok(()) => {
                 tracing::info!(
                     task_id = %envelope.task.id,
@@ -71,9 +81,17 @@ impl WorkerService {
         Ok(true)
     }
 
-    fn process_workspace(&self, workspace_dir: &PathBuf, prompt: &str) -> Result<()> {
+    fn process_workspace(
+        &self,
+        task_id: &str,
+        workspace_key: &str,
+        workspace_dir: &PathBuf,
+        prompt: &str,
+    ) -> Result<()> {
         fs::create_dir_all(&self.config.tasks_root)?;
         tracing::info!(
+            task_id = task_id,
+            workspace_key = workspace_key,
             workspace_dir = %workspace_dir.display(),
             prompt_chars = prompt.chars().count(),
             use_container = self.config.use_container,
@@ -91,6 +109,8 @@ impl WorkerService {
             env_passthrough: self.config.container_env_passthrough.clone(),
         })?;
         tracing::info!(
+            task_id = task_id,
+            workspace_key = workspace_key,
             workspace_dir = %workspace_dir.display(),
             stdout_bytes = output.stdout.len(),
             reply_html_path = %output.reply_html_path.display(),
@@ -105,6 +125,8 @@ impl WorkerService {
             subject.clone(),
         )?;
         tracing::info!(
+            task_id = task_id,
+            workspace_key = workspace_key,
             workspace_dir = %workspace_dir.display(),
             subject = %subject,
             attachment_count = preview.attachment_names.len(),
@@ -112,22 +134,28 @@ impl WorkerService {
         );
         write_preview_json(workspace_dir.join("transport_preview.json"), &preview)?;
         tracing::debug!(
+            task_id = task_id,
+            workspace_key = workspace_key,
             workspace_dir = %workspace_dir.display(),
             preview_path = %workspace_dir.join("transport_preview.json").display(),
             "wrote outbound preview artifact"
         );
-        self.deliver_reply(workspace_dir, &preview, subject)?;
+        self.deliver_reply(task_id, workspace_key, workspace_dir, &preview, subject)?;
         Ok(())
     }
 
     fn deliver_reply(
         &self,
+        task_id: &str,
+        workspace_key: &str,
         workspace_dir: &PathBuf,
         preview: &send_emails_module::OutboundPreview,
         subject: String,
     ) -> Result<()> {
         if self.config.outbound_mode != OutboundMode::Postmark {
             tracing::info!(
+                task_id = task_id,
+                workspace_key = workspace_key,
                 workspace_dir = %workspace_dir.display(),
                 outbound_mode = "preview_only",
                 "skipping outbound send and leaving preview artifacts in workspace"
@@ -152,6 +180,8 @@ impl WorkerService {
             request.reply_to.clone()
         };
         tracing::info!(
+            task_id = task_id,
+            workspace_key = workspace_key,
             workspace_dir = %workspace_dir.display(),
             to = %to,
             subject = %subject,
@@ -179,6 +209,8 @@ impl WorkerService {
 
         write_delivery_report(workspace_dir.join("delivery_report.json"), &report)?;
         tracing::info!(
+            task_id = task_id,
+            workspace_key = workspace_key,
             workspace_dir = %workspace_dir.display(),
             to = %report.to,
             subject = %report.subject,
