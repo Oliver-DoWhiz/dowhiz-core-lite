@@ -43,3 +43,4 @@ Use only the tools surfaced by the current Codex runtime session.
 - Keep new files inside the current task workspace unless the task explicitly requires creating a repo or external artifact.
 - If the user expects attachments, place them in `reply_email_attachments/` and reference them from `reply_email_draft.html`.
 - If you are blocked, explain the exact blocker and draft a clarification reply instead of claiming success.
+- After writing `reply_email_draft.html`, cat its contents to stdout so the runtime captures the reply in the task output stream.
