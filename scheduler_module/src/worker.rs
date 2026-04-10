@@ -37,7 +37,7 @@ impl WorkerService {
     }
 
     pub async fn process_once(&self) -> Result<bool> {
-        let Some(mut envelope) = self.queue.claim_next(&self.worker_id)? else {
+        let Some(envelope) = self.queue.claim_next(&self.worker_id)? else {
             return Ok(false);
         };
 
