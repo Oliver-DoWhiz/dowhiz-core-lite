@@ -135,7 +135,7 @@ fn resolve_agent_command() -> Option<String> {
     }
 
     if command_exists("codex") {
-        return Some("codex exec --input-file \"$TASK_PROMPT_FILE\"".to_string());
+        return Some("cat \"$TASK_PROMPT_FILE\" | codex exec -".to_string());
     }
 
     None
