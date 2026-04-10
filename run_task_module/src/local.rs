@@ -12,6 +12,11 @@ use crate::types::PreparedWorkspace;
 
 pub fn run_locally(prepared: &PreparedWorkspace) -> Result<String> {
     if let Some(command) = resolve_agent_command() {
+        tracing::info!(
+            workspace_dir = %prepared.workspace_dir.display(),
+            command = %command,
+            "resolved local agent command"
+        );
         return run_command(prepared, &command);
     }
 
@@ -20,10 +25,21 @@ pub fn run_locally(prepared: &PreparedWorkspace) -> Result<String> {
         prepared.prompt
     );
     fs::write(&prepared.stdout_path, &synthesized)?;
+    tracing::info!(
+        workspace_dir = %prepared.workspace_dir.display(),
+        stdout_path = %prepared.stdout_path.display(),
+        "no local agent command available; wrote synthesized task output"
+    );
     Ok(synthesized)
 }
 
 fn run_command(prepared: &PreparedWorkspace, command: &str) -> Result<String> {
+    tracing::debug!(
+        workspace_dir = %prepared.workspace_dir.display(),
+        prompt_path = %prepared.prompt_path.display(),
+        output_path = %prepared.stdout_path.display(),
+        "starting local agent process"
+    );
     let mut shell = Command::new("sh");
     shell
         .arg("-lc")
@@ -93,6 +109,12 @@ fn run_command(prepared: &PreparedWorkspace, command: &str) -> Result<String> {
         ));
     }
 
+    tracing::info!(
+        workspace_dir = %prepared.workspace_dir.display(),
+        stdout_bytes = stdout.len(),
+        stderr_bytes = stderr.len(),
+        "local agent process completed"
+    );
     Ok(stdout)
 }
 

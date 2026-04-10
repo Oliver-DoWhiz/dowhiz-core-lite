@@ -61,6 +61,12 @@ async fn create_task(
     State(state): State<AppState>,
     Json(request): Json<InboundTaskRequest>,
 ) -> std::result::Result<Json<QueuedTask>, (StatusCode, String)> {
+    tracing::info!(
+        channel = %request.channel,
+        customer_email = %request.customer_email,
+        subject = %request.subject,
+        "received direct task submission"
+    );
     state
         .scheduler
         .submit(request)
@@ -82,6 +88,13 @@ async fn receive_postmark_inbound(
     State(state): State<AppState>,
     Json(payload): Json<PostmarkInboundPayload>,
 ) -> std::result::Result<Json<QueuedTask>, (StatusCode, String)> {
+    tracing::info!(
+        from = %payload.from,
+        subject = %payload.subject,
+        attachment_count = payload.attachments.len(),
+        message_id = %payload.message_id,
+        "received inbound Postmark webhook"
+    );
     let request = task_request_from_postmark(&payload);
     let queued = state
         .scheduler

@@ -23,7 +23,15 @@ impl FileQueue {
             worker_id: None,
             error: None,
         };
-        self.write_envelope(self.pending_path(&task.id), &envelope)
+        let queue_path = self.pending_path(&task.id);
+        self.write_envelope(&queue_path, &envelope)?;
+        tracing::info!(
+            task_id = %task.id,
+            workspace_key = %task.workspace_key,
+            queue_path = %queue_path.display(),
+            "enqueued task"
+        );
+        Ok(())
     }
 
     pub fn claim_next(&self, worker_id: &str) -> Result<Option<TaskEnvelope>> {
@@ -40,6 +48,12 @@ impl FileQueue {
                     envelope.task.status = TaskStatus::Claimed;
                     envelope.worker_id = Some(worker_id.to_string());
                     self.write_envelope(&claimed_path, &envelope)?;
+                    tracing::info!(
+                        task_id = %envelope.task.id,
+                        worker_id = worker_id,
+                        claimed_path = %claimed_path.display(),
+                        "claimed task for worker"
+                    );
                     return Ok(Some(envelope));
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
@@ -51,13 +65,26 @@ impl FileQueue {
 
     pub fn complete(&self, mut envelope: TaskEnvelope) -> Result<()> {
         envelope.task.status = TaskStatus::Completed;
-        self.write_terminal(&self.completed_dir(), envelope)
+        self.write_terminal(&self.completed_dir(), envelope.clone())?;
+        tracing::info!(
+            task_id = %envelope.task.id,
+            worker_id = envelope.worker_id.as_deref().unwrap_or("unknown"),
+            "marked task completed"
+        );
+        Ok(())
     }
 
     pub fn fail(&self, mut envelope: TaskEnvelope, error: String) -> Result<()> {
         envelope.task.status = TaskStatus::Failed;
         envelope.error = Some(error);
-        self.write_terminal(&self.failed_dir(), envelope)
+        self.write_terminal(&self.failed_dir(), envelope.clone())?;
+        tracing::warn!(
+            task_id = %envelope.task.id,
+            worker_id = envelope.worker_id.as_deref().unwrap_or("unknown"),
+            error = %envelope.error.as_deref().unwrap_or("unknown"),
+            "marked task failed"
+        );
+        Ok(())
     }
 
     fn write_terminal(&self, dir: &Path, envelope: TaskEnvelope) -> Result<()> {
