@@ -204,6 +204,68 @@ On the frontend side, that means the drag-and-drop area should upload files imme
 show the user a pending attachment list, and submit the final task with only those
 returned refs.
 
+### Attachment staging flow
+
+The local POC implements a two-phase upload:
+
+```text
+┌──────────┐    POST /uploads     ┌─────────────────────────────────────┐
+│  Client  │ ──────────────────►  │  Gateway: upload_attachments()     │
+│          │   (multipart bytes)  │  -> attachment_store.stage_bytes() │
+└──────────┘                      └─────────────────────────────────────┘
+                                                  │
+                                                  ▼
+                                  ┌─────────────────────────────────────┐
+                                  │  .uploads/{upload_id}/              │
+                                  │    payload.bin     (raw bytes)      │
+                                  │    metadata.json   (name, type)     │
+                                  └─────────────────────────────────────┘
+                                                  │
+                                                  │ returns AttachmentUploadRef
+                                                  ▼
+┌──────────┐    POST /tasks       ┌─────────────────────────────────────┐
+│  Client  │ ──────────────────►  │  Gateway: create_task()             │
+│          │   (JSON with refs)   │  -> scheduler.submit_with_initializer()
+└──────────┘                      │     -> attachment_store.materialize_refs()
+                                  └─────────────────────────────────────┘
+                                                  │
+                                                  ▼
+                                  ┌─────────────────────────────────────┐
+                                  │  .workspace/tasks/{tenant}/{account}/{id}/
+                                  │    incoming_attachments/            │
+                                  │      notes.pdf      (original name) │
+                                  │      thread_manifest.json           │
+                                  └─────────────────────────────────────┘
+                                                  │
+                                  (.uploads/{upload_id}/ deleted after copy)
+```
+
+**Step 1: Stage bytes** (`POST /uploads`)
+
+- Client sends `multipart/form-data` with one or more files.
+- `service.rs:upload_attachments()` extracts each file field.
+- `attachment_store.rs:stage_bytes()` saves bytes to `.uploads/{uuid}/payload.bin`
+  and metadata to `.uploads/{uuid}/metadata.json`.
+- Returns `AttachmentUploadRef` with `upload_id`, `file_name`, `content_type`, `size_bytes`.
+
+**Step 2: Create task with refs** (`POST /tasks`)
+
+- Client sends JSON with `attachment_refs` array (no bytes, just the refs from step 1).
+- `service.rs:create_task()` calls `scheduler.submit_with_initializer()`.
+- The initializer callback runs `attachment_store.rs:materialize_refs()`:
+  - Reads `payload.bin` from each staged upload.
+  - Copies to `incoming_attachments/{original_filename}` in the task workspace.
+  - Writes `thread_manifest.json` listing all attachments.
+  - Deletes the staged `.uploads/{upload_id}/` directory.
+
+**Why this design:**
+
+- `POST /tasks` stays small and fast (JSON only, no file bytes).
+- Files can upload in parallel before task submission.
+- Failed task creation does not require re-uploading.
+- Frontend can show per-file upload progress.
+- Codex sees normal files in `incoming_attachments/`, same as email ingress.
+
 ## 7. Multiple inbound gateways and distributed coordination
 
 The current file queue is intentionally local and good for a single-node replica. For a
