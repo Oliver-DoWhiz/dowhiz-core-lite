@@ -1,7 +1,7 @@
 # Scaling And Runtime Notes
 
-This document answers the follow-up architecture questions from issue #2 and ties them
-back to concrete changes in the repo.
+This document answers the follow-up architecture questions from issue #2 and issue #14
+and ties them back to concrete changes in the repo.
 
 ## 1. Where the Codex logic lives
 
@@ -111,7 +111,97 @@ If I wanted a simple non-cloud deployment, I would use:
 
 That gives predictable lookups and avoids binding the worker contract to one vendor.
 
-## 6. Multiple inbound gateways and distributed coordination
+The current code still allows `InboundTaskRequest` to carry `memory_uri`,
+`identity_uri`, and `credential_refs` directly. That is acceptable for an internal
+normalized request, but I would not keep that as the public browser-facing contract.
+
+The cleaner boundary is:
+
+1. Public client sends the user-visible task fields such as `customer_email`, `subject`,
+   `prompt`, channel metadata, and optionally a stable `account_id`.
+2. Gateway resolves `account_id` if it was not provided, for example by looking up
+   `customer_email`.
+3. Gateway looks up `memory_uri`, `identity_uri`, and `credential_refs` from a
+   server-side account registry.
+4. Gateway enqueues an enriched internal `InboundTaskRequest`.
+
+If DoWhiz wants the smallest possible first step, a simple KV layer is enough:
+
+- `customer_email -> account_id`
+- `account_id -> memory_uri`
+- `account_id -> identity_uri`
+
+That keeps memory lookup on the server side where it belongs, while still matching the
+current workspace manifest shape.
+
+## 6. Attachment handling for direct tasks and the frontend
+
+Codex does not need a special attachment API once the task starts. It already knows how
+to work with normal files in the workspace. The important part is what the gateway does
+before the task is queued.
+
+The email ingress path already shows the right model:
+
+- raw provider payload goes under `incoming_email/`
+- decoded files go under `incoming_attachments/`
+- a small `thread_manifest.json` records attachment names
+- the task prompt and workspace prompt tell Codex where to look
+
+I would reuse that same contract for browser-submitted tasks. The browser should not
+base64-embed large files into the JSON body of `POST /tasks`. That creates slow uploads,
+large request bodies, and unnecessary duplication.
+
+Two reasonable options:
+
+- Local/dev-only: submit `multipart/form-data` directly to the gateway so the proof of
+  concept can support drag-and-drop without new storage infrastructure.
+- Production/scalable: upload files first, then send only attachment references in the
+  final task creation request.
+
+For the scalable path, the public request should look more like this:
+
+```json
+{
+  "customer_email": "dtang04@uchicago.edu",
+  "account_id": "user_42",
+  "subject": "Review these files",
+  "prompt": "Use the attached spreadsheet and PDF.",
+  "channel": "email",
+  "reply_to": "dtang04@uchicago.edu",
+  "attachment_refs": [
+    {
+      "file_name": "model.xlsx",
+      "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "size_bytes": 182044,
+      "storage_uri": "az://task-uploads/user_42/abc123"
+    },
+    {
+      "file_name": "notes.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 90211,
+      "storage_uri": "az://task-uploads/user_42/def456"
+    }
+  ]
+}
+```
+
+Then the gateway can:
+
+1. Resolve the account and memory metadata.
+2. Download or copy each referenced blob into `incoming_attachments/`.
+3. Write the attachment manifest alongside the files.
+4. Queue the same normalized worker task shape used by email ingress.
+
+If DoWhiz wants to avoid storage URIs in the client request, the same pattern can use
+gateway-issued `upload_id` values instead. The important design choice is the same:
+`POST /tasks` should carry attachment metadata or references, not the file bytes
+themselves.
+
+On the frontend side, that means the drag-and-drop area should upload files immediately,
+show the user a pending attachment list, and submit the final task with only those
+returned refs.
+
+## 7. Multiple inbound gateways and distributed coordination
 
 The current file queue is intentionally local and good for a single-node replica. For a
 distributed deployment, I would split the system like this:
@@ -147,7 +237,7 @@ The worker can then fetch only that task workspace into its local staging area, 
 resulting reply artifacts back to durable storage. That preserves the current queue-based
 shape without exposing a tenant-wide share inside the container.
 
-## 7. Inbound webhooks
+## 8. Inbound webhooks
 
 Outbound delivery is no longer the only mail integration. The gateway now also accepts
 `POST /webhooks/postmark/inbound`, persists the raw provider payload, decodes merged
@@ -159,7 +249,7 @@ That keeps the scheduler boundary clean:
 postmark webhook -> inbound_email adapter -> task scheduler -> queue -> worker
 ```
 
-## 8. Why the gateway uses a TCP listener
+## 9. Why the gateway uses a TCP listener
 
 `service.rs` does not process raw TCP payloads. It binds a TCP socket because HTTP servers
 need a socket transport. Axum then serves HTTP JSON on top of that listener.

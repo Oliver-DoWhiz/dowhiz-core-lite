@@ -98,6 +98,16 @@ Notes:
 - If `codex` is not installed locally, the worker falls back to the existing
   synthesized stub response instead of a live model stream.
 
+The current frontend is intentionally text-only. For attachment support, the better
+next step is to preserve the existing workspace contract instead of stuffing file bytes
+into the JSON body for `POST /tasks`:
+
+- For a small local demo, submit `multipart/form-data` to the gateway.
+- For a scalable path, upload files first and send only attachment references in the
+  final `POST /tasks` payload.
+- The gateway should materialize those files into `incoming_attachments/` and write a
+  small manifest before queueing the task, so Codex sees normal files in the workspace.
+
 For multi-tenant requests, the scheduler now partitions workspaces as:
 
 ```text
@@ -106,6 +116,10 @@ For multi-tenant requests, the scheduler now partitions workspaces as:
 
 Each task gets a `workspace_manifest.json` that records the stable workspace key,
 identity URI, memory URI, and credential references needed by downstream workers.
+The current `InboundTaskRequest` struct still carries those fields directly, but the
+intended long-term boundary is that public clients send `customer_email` plus an
+optional stable `account_id`, and the gateway resolves memory and identity references
+server-side before enqueueing the internal task request.
 
 ## ACI workspace tree
 
@@ -220,6 +234,15 @@ The gateway exposes two ingress paths:
 - `POST /webhooks/postmark/inbound`: accept a Postmark inbound webhook, persist the raw
   payload under `incoming_email/`, decode any merged attachments into
   `incoming_attachments/`, and queue the task for the worker
+
+For direct non-email task creation, the recommended public API is:
+
+- Browser uploads attachment content separately, or sends `multipart/form-data` in local
+  development.
+- Browser then submits task metadata plus attachment references.
+- Gateway resolves account metadata, looks up memory/identity server-side, writes the
+  attachment files into the task workspace, and only then enqueues the normalized
+  scheduler request.
 
 ## Outbound delivery
 
