@@ -2,6 +2,38 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTaskRequest {
+    pub customer_email: String,
+    pub subject: String,
+    pub prompt: String,
+    #[serde(default = "default_channel")]
+    pub channel: String,
+    #[serde(default)]
+    pub reply_to: String,
+    #[serde(default)]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub account_id: String,
+    #[serde(default)]
+    pub attachment_refs: Vec<AttachmentUploadRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttachmentUploadRef {
+    pub upload_id: String,
+    pub file_name: String,
+    #[serde(default)]
+    pub content_type: String,
+    #[serde(default)]
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UploadAttachmentsResponse {
+    pub attachments: Vec<AttachmentUploadRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundTaskRequest {
     pub customer_email: String,
     pub subject: String,

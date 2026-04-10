@@ -12,8 +12,8 @@
         <p class="eyebrow">DoWhiz Core Lite</p>
         <h1>Frontend test bench for live task runs.</h1>
         <p class="hero-copy">
-          Submit a JSON-backed task, poll the Rust gateway, and watch the Codex
-          output accumulate while the worker is still running.
+          Upload local files into the gateway, submit a lightweight task payload,
+          and watch the Codex output accumulate while the worker is still running.
         </p>
       </header>
 
@@ -45,6 +45,22 @@
               <textarea id="prompt" name="prompt" rows="9" required>Read the incoming request, complete the task, and draft the reply email. Explain the result clearly.</textarea>
             </label>
 
+            <div class="attachment-card">
+              <div class="attachment-header">
+                <div>
+                  <span class="label">Attachments</span>
+                  <p class="attachment-copy">Files upload first, then `/tasks` only sends refs.</p>
+                </div>
+                <button id="clear-attachments" type="button" class="ghost-button">Clear</button>
+              </div>
+              <label class="file-picker">
+                <span>Add files</span>
+                <input id="attachment-input" type="file" multiple />
+              </label>
+              <p id="attachment-status" class="muted">No attachments uploaded.</p>
+              <ul id="attachment-list" class="attachment-list"></ul>
+            </div>
+
             <div class="form-actions">
               <button id="run-button" type="submit">Run task</button>
               <p id="submit-state" class="muted">Waiting for a new request.</p>
@@ -55,7 +71,7 @@
         <section class="panel panel-preview">
           <div class="panel-heading">
             <p class="panel-kicker">Transport</p>
-            <h2>Serialized JSON payload</h2>
+            <h2>Serialized task payload</h2>
           </div>
           <pre id="payload-preview" class="code-block"></pre>
         </section>

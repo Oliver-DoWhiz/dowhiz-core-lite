@@ -1,3 +1,5 @@
+pub mod account_registry;
+pub mod attachment_store;
 pub mod config;
 pub mod inbound_email;
 pub mod models;

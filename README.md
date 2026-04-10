@@ -49,6 +49,23 @@ cp .env.example .env
 Set `OPENAI_API_KEY` in `.env`. If the `codex` CLI is installed locally, the worker
 will now invoke it automatically without requiring `LOCAL_AGENT_COMMAND`.
 
+Optional gateway-side account lookup uses `ACCOUNT_REGISTRY_PATH`. The file is a small
+JSON KV store with one map for account identifiers and one map for memory paths:
+
+```json
+{
+  "identifiers_by_account_id": {
+    "acct_dtang04": {
+      "emails": ["dtang04@uchicago.edu"],
+      "phones": ["+16309153426"]
+    }
+  },
+  "memory_path_by_account_id": {
+    "acct_dtang04": "/absolute/path/to/user-memory"
+  }
+}
+```
+
 Start the worker:
 
 ```bash
@@ -76,6 +93,61 @@ curl -X POST http://127.0.0.1:9100/tasks \
 
 The worker writes per-task artifacts under `dowhiz-core-lite/.workspace/tasks/`.
 
+## Attachment uploads without cloud storage
+
+The gateway now supports a local upload-ref flow that avoids base64-heavy `POST /tasks`
+payloads and preserves the original attachment bytes:
+
+1. `POST /uploads` with `multipart/form-data`
+2. receive lightweight `upload_id` refs back
+3. `POST /tasks` with normal task JSON plus `attachment_refs`
+4. the gateway copies those staged files into `incoming_attachments/` and writes
+   `thread_manifest.json` before enqueueing the task
+
+Example:
+
+```bash
+curl -X POST http://127.0.0.1:9100/uploads \
+  -F "file=@./notes.pdf" \
+  -F "file=@./model.xlsx"
+```
+
+Sample response:
+
+```json
+{
+  "attachments": [
+    {
+      "upload_id": "0dbb8f17-2d60-49fa-88b9-73fb58a8ed41",
+      "file_name": "notes.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 90211
+    }
+  ]
+}
+```
+
+Then submit the task:
+
+```bash
+curl -X POST http://127.0.0.1:9100/tasks \
+  -H 'content-type: application/json' \
+  -d '{
+    "customer_email": "dtang04@uchicago.edu",
+    "subject": "Review these files",
+    "prompt": "Use the uploaded spreadsheet and PDF.",
+    "reply_to": "dtang04@uchicago.edu",
+    "attachment_refs": [
+      {
+        "upload_id": "0dbb8f17-2d60-49fa-88b9-73fb58a8ed41",
+        "file_name": "notes.pdf",
+        "content_type": "application/pdf",
+        "size_bytes": 90211
+      }
+    ]
+  }'
+```
+
 ## Frontend proof of concept
 
 The repo now includes a small JavaScript frontend under
@@ -100,15 +172,12 @@ Notes:
 - If `codex` is not installed locally, the worker falls back to the existing
   synthesized stub response instead of a live model stream.
 
-The current frontend is intentionally text-only. For attachment support, the better
-next step is to preserve the existing workspace contract instead of stuffing file bytes
-into the JSON body for `POST /tasks`:
+The frontend now uses the same lightweight attachment contract:
 
-- For a small local demo, submit `multipart/form-data` to the gateway.
-- For a scalable path, upload files first and send only attachment references in the
-  final `POST /tasks` payload.
-- The gateway should materialize those files into `incoming_attachments/` and write a
-  small manifest before queueing the task, so Codex sees normal files in the workspace.
+- files upload to `POST /uploads` first
+- the browser stores the returned refs client-side
+- `POST /tasks` sends only task metadata plus `attachment_refs`
+- the gateway materializes those files into `incoming_attachments/` before queueing
 
 For multi-tenant requests, the scheduler now partitions workspaces as:
 
