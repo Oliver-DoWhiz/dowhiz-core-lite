@@ -169,6 +169,16 @@ body::before {
   background: rgba(255, 250, 240, 0.75);
 }
 
+.account-card {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid rgba(24, 33, 30, 0.1);
+  border-radius: 18px;
+  background: rgba(255, 250, 240, 0.75);
+}
+
+.account-header,
 .attachment-header {
   display: flex;
   align-items: flex-start;

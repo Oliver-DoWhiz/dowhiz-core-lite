@@ -15,20 +15,26 @@ const taskError = document.querySelector("#task-error");
 const stdoutStream = document.querySelector("#stdout-stream");
 const replyFrame = document.querySelector("#reply-frame");
 const runButton = document.querySelector("#run-button");
+const accountIdInput = document.querySelector("#account-id");
+const accountStatus = document.querySelector("#account-status");
+const generateAccountIdButton = document.querySelector("#generate-account-id");
 
 const fieldSelectors = [
   "#customer-email",
   "#reply-to",
+  "#account-id",
   "#subject",
   "#prompt",
 ];
 
 let pollHandle = null;
 let attachmentRefs = [];
+let registerAccountId = false;
 
 function buildPayload() {
   const customerEmail = document.querySelector("#customer-email").value.trim();
   const replyTo = document.querySelector("#reply-to").value.trim();
+  const accountId = accountIdInput.value.trim();
   const subject = document.querySelector("#subject").value.trim();
   const prompt = document.querySelector("#prompt").value.trim();
 
@@ -38,6 +44,8 @@ function buildPayload() {
     prompt,
     channel: "email",
     reply_to: replyTo,
+    account_id: accountId,
+    register_account_id: registerAccountId && accountId.length > 0,
     attachment_refs: attachmentRefs,
   };
 }
@@ -107,6 +115,45 @@ function clearAttachments() {
   renderAttachmentList();
   renderPayloadPreview();
   clearAttachmentsButton.disabled = true;
+}
+
+async function generateAccountId() {
+  generateAccountIdButton.disabled = true;
+  accountStatus.textContent = "Generating a fresh account ID...";
+  resetError();
+
+  try {
+    const response = await fetch("/account-ids/suggest", {
+      method: "POST",
+    });
+
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+
+    const result = await response.json();
+    accountIdInput.value = result.account_id;
+    registerAccountId = true;
+    accountStatus.textContent = "Generated a new account ID. The next task submission will reserve it.";
+    renderPayloadPreview();
+  } catch (error) {
+    showError(error instanceof Error ? error.message : String(error));
+    accountStatus.textContent = "Unable to generate an account ID right now.";
+  } finally {
+    generateAccountIdButton.disabled = false;
+  }
+}
+
+function handleAccountIdInput() {
+  registerAccountId = false;
+
+  if (accountIdInput.value.trim().length === 0) {
+    accountStatus.textContent = "Leave blank to use the legacy email-only lookup flow.";
+  } else {
+    accountStatus.textContent = "Using the provided account ID. Existing accounts will be reused.";
+  }
+
+  renderPayloadPreview();
 }
 
 async function submitTask(event) {
@@ -224,11 +271,16 @@ function formatBytes(size) {
 }
 
 for (const selector of fieldSelectors) {
-  document.querySelector(selector).addEventListener("input", renderPayloadPreview);
+  if (selector === "#account-id") {
+    document.querySelector(selector).addEventListener("input", handleAccountIdInput);
+  } else {
+    document.querySelector(selector).addEventListener("input", renderPayloadPreview);
+  }
 }
 
 attachmentInput.addEventListener("change", uploadSelectedFiles);
 clearAttachmentsButton.addEventListener("click", clearAttachments);
+generateAccountIdButton.addEventListener("click", generateAccountId);
 form.addEventListener("submit", submitTask);
 clearAttachmentsButton.disabled = true;
 renderAttachmentList();

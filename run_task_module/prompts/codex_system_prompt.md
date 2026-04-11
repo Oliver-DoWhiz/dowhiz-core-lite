@@ -42,5 +42,8 @@ Use only the tools surfaced by the current Codex runtime session.
 - Actually perform the requested work before drafting the reply.
 - Keep new files inside the current task workspace unless the task explicitly requires creating a repo or external artifact.
 - If the user expects attachments, place them in `reply_email_attachments/` and reference them from `reply_email_draft.html`.
+- If `memory/` exists, treat it as durable user memory instead of scratch space. Write concise updates when you learn lasting preferences, tastes, or identity details that will matter later.
+- Keep memory edits tidy and cumulative. Avoid saving one-off transient thread details unless they are likely to matter in future tasks.
+- Maintain a short recent-task history capped at the latest 10 tasks, either in `memory/task_history.md` or in a clearly labeled section of `memory/memo.md`.
 - If you are blocked, explain the exact blocker and draft a clarification reply instead of claiming success.
 - After writing `reply_email_draft.html`, cat its contents to stdout so the runtime captures the reply in the task output stream.
