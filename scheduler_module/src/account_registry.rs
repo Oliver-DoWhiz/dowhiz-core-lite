@@ -1,10 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::models::{CreateTaskRequest, InboundTaskRequest};
@@ -19,23 +18,11 @@ pub struct AccountRegistry {
     memory_root: PathBuf,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AccountRegistryData {
-    #[serde(default)]
-    pub identifiers_by_account_id: HashMap<String, AccountIdentifiers>,
-    #[serde(default)]
-    pub memory_path_by_account_id: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AccountIdentifiers {
-    #[serde(default)]
     pub emails: Vec<String>,
-    #[serde(default)]
     pub phones: Vec<String>,
-    #[serde(default)]
     pub slack_user_ids: Vec<String>,
-    #[serde(default)]
     pub discord_user_ids: Vec<String>,
 }
 
@@ -104,8 +91,8 @@ impl From<serde_json::Error> for AccountRegistryError {
 
 impl AccountRegistry {
     pub fn load(path: impl Into<PathBuf>) -> Result<Self> {
-        let legacy_registry_path = path.into();
-        let registry_dir = legacy_registry_path
+        let configured_path = path.into();
+        let registry_dir = configured_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
@@ -113,16 +100,11 @@ impl AccountRegistry {
         let memory_paths_db_path = registry_dir.join(MEMORY_PATHS_DB_FILE);
 
         initialize_store(&identifiers_db_path, &memory_paths_db_path)?;
-        migrate_legacy_registry_if_needed(
-            &legacy_registry_path,
-            &identifiers_db_path,
-            &memory_paths_db_path,
-        )?;
 
         Ok(Self {
             identifiers_db_path,
             memory_paths_db_path,
-            memory_root: default_memory_root(&legacy_registry_path),
+            memory_root: default_memory_root(&configured_path),
         })
     }
 
@@ -341,57 +323,6 @@ fn initialize_store(identifiers_db_path: &Path, memory_paths_db_path: &Path) -> 
         );
         ",
     )?;
-    Ok(())
-}
-
-fn migrate_legacy_registry_if_needed(
-    legacy_registry_path: &Path,
-    identifiers_db_path: &Path,
-    memory_paths_db_path: &Path,
-) -> Result<()> {
-    if !legacy_registry_path.exists() {
-        return Ok(());
-    }
-
-    let mut conn = open_attached_connection(identifiers_db_path, memory_paths_db_path)?;
-    let identifiers_count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM account_identifiers", [], |row| {
-            row.get(0)
-        })?;
-    let memory_paths_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memory_registry.account_memory_paths",
-        [],
-        |row| row.get(0),
-    )?;
-    if identifiers_count > 0 || memory_paths_count > 0 {
-        return Ok(());
-    }
-
-    let payload = fs::read_to_string(legacy_registry_path).with_context(|| {
-        format!(
-            "failed to read account registry {}",
-            legacy_registry_path.display()
-        )
-    })?;
-    let data = serde_json::from_str::<AccountRegistryData>(&payload).with_context(|| {
-        format!(
-            "failed to parse account registry {}",
-            legacy_registry_path.display()
-        )
-    })?;
-
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    for (account_id, identifiers) in &data.identifiers_by_account_id {
-        upsert_account_identifiers_tx(&tx, account_id, identifiers)?;
-    }
-    for (account_id, memory_path) in &data.memory_path_by_account_id {
-        tx.execute(
-            "INSERT OR REPLACE INTO memory_registry.account_memory_paths (account_id, memory_path)
-             VALUES (?1, ?2)",
-            params![account_id, memory_path],
-        )?;
-    }
-    tx.commit()?;
     Ok(())
 }
 
@@ -813,46 +744,46 @@ mod tests {
     use crate::models::CreateTaskRequest;
 
     #[test]
-    fn migrates_legacy_json_registry_into_sqlite_on_load() {
+    fn ignores_legacy_json_registry_and_starts_with_empty_sqlite() {
         let root = temp_dir("account-registry-migrate");
         let registry_path = root.join("account_registry.json");
         fs::write(
             &registry_path,
-            serde_json::to_string_pretty(&AccountRegistryData {
-                identifiers_by_account_id: HashMap::from([(
-                    "acct_123".to_string(),
-                    AccountIdentifiers {
-                        emails: vec!["dtang04@uchicago.edu".to_string()],
-                        phones: vec!["+16309153426".to_string()],
-                        slack_user_ids: vec!["U0AG9M23K1R".to_string()],
-                        discord_user_ids: Vec::new(),
-                    },
-                )]),
-                memory_path_by_account_id: HashMap::from([(
-                    "acct_123".to_string(),
-                    root.join("memory-source").display().to_string(),
-                )]),
-            })
-            .unwrap(),
+            r#"{
+  "identifiers_by_account_id": {
+    "acct_123": {
+      "emails": ["dtang04@uchicago.edu"],
+      "phones": ["+16309153426"],
+      "slack_user_ids": ["U0AG9M23K1R"],
+      "discord_user_ids": []
+    }
+  },
+  "memory_path_by_account_id": {
+    "acct_123": "ignored"
+  }
+}"#,
         )
         .unwrap();
 
-        let _registry = AccountRegistry::load(&registry_path).unwrap();
-
-        let identifiers = load_account_identifiers(&root.join(IDENTIFIERS_DB_FILE), "acct_123")
-            .unwrap()
+        let registry = AccountRegistry::load(&registry_path).unwrap();
+        let (request, resolved) = registry
+            .resolve_create_request(CreateTaskRequest {
+                customer_email: "dtang04@uchicago.edu".to_string(),
+                subject: "Need help".to_string(),
+                prompt: "Inspect memory".to_string(),
+                channel: "email".to_string(),
+                reply_to: String::new(),
+                tenant_id: String::new(),
+                account_id: String::new(),
+                register_account_id: false,
+                attachment_refs: Vec::new(),
+            })
             .unwrap();
-        assert_eq!(identifiers.emails, vec!["dtang04@uchicago.edu".to_string()]);
-        assert_eq!(identifiers.phones, vec!["+16309153426".to_string()]);
-        assert_eq!(
-            ensure_memory_path_record(
-                &root.join(MEMORY_PATHS_DB_FILE),
-                "acct_123",
-                "ignored-default"
-            )
-            .unwrap(),
-            root.join("memory-source").display().to_string()
-        );
+
+        assert!(request.account_id.is_empty());
+        assert!(request.identity_uri.is_empty());
+        assert_eq!(resolved.account_id, None);
+        assert_eq!(resolved.memory_path, None);
     }
 
     #[test]
@@ -863,28 +794,22 @@ mod tests {
         fs::write(memory_dir.join("memo.md"), "# hello").unwrap();
 
         let registry_path = root.join("account_registry.json");
-        fs::write(
-            &registry_path,
-            serde_json::to_string_pretty(&AccountRegistryData {
-                identifiers_by_account_id: HashMap::from([(
-                    "acct_123".to_string(),
-                    AccountIdentifiers {
-                        emails: vec!["dtang04@uchicago.edu".to_string()],
-                        phones: vec!["+16309153426".to_string()],
-                        slack_user_ids: Vec::new(),
-                        discord_user_ids: Vec::new(),
-                    },
-                )]),
-                memory_path_by_account_id: HashMap::from([(
-                    "acct_123".to_string(),
-                    memory_dir.display().to_string(),
-                )]),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
         let registry = AccountRegistry::load(&registry_path).unwrap();
+        registry
+            .resolve_create_request(CreateTaskRequest {
+                customer_email: "dtang04@uchicago.edu".to_string(),
+                subject: "Need help".to_string(),
+                prompt: "Register memory".to_string(),
+                channel: "email".to_string(),
+                reply_to: String::new(),
+                tenant_id: String::new(),
+                account_id: "acct_123".to_string(),
+                register_account_id: false,
+                attachment_refs: Vec::new(),
+            })
+            .unwrap();
+        set_memory_path(&root, "acct_123", &memory_dir);
+
         let (request, resolved) = registry
             .resolve_create_request(CreateTaskRequest {
                 customer_email: "dtang04@uchicago.edu".to_string(),
@@ -970,20 +895,21 @@ mod tests {
     fn rejects_registering_an_already_taken_account_id() {
         let root = temp_dir("account-registry-taken");
         let registry_path = root.join("account_registry.json");
-        fs::write(
-            &registry_path,
-            serde_json::to_string_pretty(&AccountRegistryData {
-                identifiers_by_account_id: HashMap::from([(
-                    "acct_manual".to_string(),
-                    AccountIdentifiers::default(),
-                )]),
-                memory_path_by_account_id: HashMap::new(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
         let registry = AccountRegistry::load(&registry_path).unwrap();
+        registry
+            .resolve_create_request(CreateTaskRequest {
+                customer_email: "existing@example.com".to_string(),
+                subject: "Seed account".to_string(),
+                prompt: "Inspect memory".to_string(),
+                channel: "email".to_string(),
+                reply_to: "reply@example.com".to_string(),
+                tenant_id: String::new(),
+                account_id: "acct_manual".to_string(),
+                register_account_id: false,
+                attachment_refs: Vec::new(),
+            })
+            .unwrap();
+
         let err = registry
             .resolve_create_request(CreateTaskRequest {
                 customer_email: "dtang04@uchicago.edu".to_string(),
@@ -1007,25 +933,21 @@ mod tests {
     fn appends_new_email_to_existing_account() {
         let root = temp_dir("account-registry-email");
         let registry_path = root.join("account_registry.json");
-        fs::write(
-            &registry_path,
-            serde_json::to_string_pretty(&AccountRegistryData {
-                identifiers_by_account_id: HashMap::from([(
-                    "acct_manual".to_string(),
-                    AccountIdentifiers {
-                        emails: vec!["dylan@dowhiz.com".to_string()],
-                        phones: Vec::new(),
-                        slack_user_ids: Vec::new(),
-                        discord_user_ids: Vec::new(),
-                    },
-                )]),
-                memory_path_by_account_id: HashMap::new(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
         let registry = AccountRegistry::load(&registry_path).unwrap();
+        registry
+            .resolve_create_request(CreateTaskRequest {
+                customer_email: "dylan@dowhiz.com".to_string(),
+                subject: "Need help".to_string(),
+                prompt: "Inspect memory".to_string(),
+                channel: "email".to_string(),
+                reply_to: "reply@example.com".to_string(),
+                tenant_id: String::new(),
+                account_id: "acct_manual".to_string(),
+                register_account_id: false,
+                attachment_refs: Vec::new(),
+            })
+            .unwrap();
+
         registry
             .resolve_create_request(CreateTaskRequest {
                 customer_email: "dtang04@uchicago.edu".to_string(),
@@ -1053,31 +975,28 @@ mod tests {
     }
 
     #[test]
-    fn initializes_missing_memo_for_existing_memory_path_without_rewriting_legacy_registry() {
-        let root = temp_dir("account-registry-init-existing-memory");
+    fn initializes_missing_memo_for_existing_sqlite_memory_path_without_creating_legacy_file() {
+        let root = temp_dir("account-registry-init-sqlite-memory");
         let memory_dir = root.join("memory-source");
         fs::create_dir_all(&memory_dir).unwrap();
 
         let registry_path = root.join("account_registry.json");
-        let registry_payload = serde_json::to_string_pretty(&AccountRegistryData {
-            identifiers_by_account_id: HashMap::from([(
-                "acct_123".to_string(),
-                AccountIdentifiers {
-                    emails: vec!["dtang04@uchicago.edu".to_string()],
-                    phones: Vec::new(),
-                    slack_user_ids: Vec::new(),
-                    discord_user_ids: Vec::new(),
-                },
-            )]),
-            memory_path_by_account_id: HashMap::from([(
-                "acct_123".to_string(),
-                memory_dir.display().to_string(),
-            )]),
-        })
-        .unwrap();
-        fs::write(&registry_path, &registry_payload).unwrap();
-
         let registry = AccountRegistry::load(&registry_path).unwrap();
+        registry
+            .resolve_create_request(CreateTaskRequest {
+                customer_email: "dtang04@uchicago.edu".to_string(),
+                subject: "Seed account".to_string(),
+                prompt: "Inspect memory".to_string(),
+                channel: "email".to_string(),
+                reply_to: String::new(),
+                tenant_id: String::new(),
+                account_id: "acct_123".to_string(),
+                register_account_id: false,
+                attachment_refs: Vec::new(),
+            })
+            .unwrap();
+        set_memory_path(&root, "acct_123", &memory_dir);
+
         let (_, resolved) = registry
             .resolve_create_request(CreateTaskRequest {
                 customer_email: "dtang04@uchicago.edu".to_string(),
@@ -1098,7 +1017,7 @@ mod tests {
             fs::read_to_string(memory_dir.join("memo.md")).unwrap(),
             "# Memo\n"
         );
-        assert_eq!(fs::read_to_string(registry_path).unwrap(), registry_payload);
+        assert!(!registry_path.exists());
     }
 
     #[test]
@@ -1132,5 +1051,14 @@ mod tests {
         let path = std::env::temp_dir().join(format!("{}-{}", prefix, unique));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn set_memory_path(root: &Path, account_id: &str, memory_path: &Path) {
+        let conn = open_memory_connection(&root.join(MEMORY_PATHS_DB_FILE)).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO account_memory_paths (account_id, memory_path) VALUES (?1, ?2)",
+            params![account_id, memory_path.display().to_string()],
+        )
+        .unwrap();
     }
 }

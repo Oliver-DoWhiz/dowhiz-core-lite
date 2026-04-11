@@ -49,15 +49,15 @@ cp .env.example .env
 Set `OPENAI_API_KEY` in `.env`. If the `codex` CLI is installed locally, the worker
 will now invoke it automatically without requiring `LOCAL_AGENT_COMMAND`.
 
-Optional gateway-side account lookup uses `ACCOUNT_REGISTRY_PATH` as the legacy import
-location for account metadata. The runtime now persists account state in two SQLite
-files next to that path:
+Optional gateway-side account lookup uses `ACCOUNT_REGISTRY_PATH` to choose where the
+runtime should place its SQLite account stores. The worker creates two SQLite files
+next to that path:
 
 - `account_identifiers.sqlite3`: keyed by `account_id`, stores emails/phones/chat IDs
 - `account_memory_paths.sqlite3`: keyed by `account_id`, stores memory roots
 
-If an `account_registry.json` file already exists at `ACCOUNT_REGISTRY_PATH`, the
-gateway imports it into those SQLite files automatically on first load.
+Any existing `account_registry.json` file at `ACCOUNT_REGISTRY_PATH` is ignored.
+For this POC, SQLite always starts from a fresh store.
 
 Start the worker:
 
