@@ -57,11 +57,7 @@ impl std::fmt::Display for AccountRegistryError {
                 write!(f, "account_id '{}' has already been taken", account_id)
             }
             Self::EmailAlreadyBound { email, account_id } => {
-                write!(
-                    f,
-                    "email '{}' is already linked to account '{}'",
-                    email, account_id
-                )
+                write!(f, "email '{}' is already linked to account '{}'", email, account_id)
             }
             Self::InvalidAccountId(account_id) => write!(
                 f,
@@ -107,8 +103,9 @@ impl AccountRegistry {
 
         let payload = fs::read_to_string(&path)
             .with_context(|| format!("failed to read account registry {}", path.display()))?;
-        let data = serde_json::from_str::<AccountRegistryData>(&payload)
-            .with_context(|| format!("failed to parse account registry {}", path.display()))?;
+        let data = serde_json::from_str::<AccountRegistryData>(&payload).with_context(|| {
+            format!("failed to parse account registry {}", path.display())
+        })?;
 
         Ok(Self {
             path,
@@ -165,11 +162,7 @@ impl AccountRegistry {
         Err(anyhow!("failed to generate a unique account_id").into())
     }
 
-    pub fn materialize_memory(
-        &self,
-        workspace_dir: &Path,
-        resolved: &ResolvedAccount,
-    ) -> Result<()> {
+    pub fn materialize_memory(&self, workspace_dir: &Path, resolved: &ResolvedAccount) -> Result<()> {
         let Some(memory_path) = resolved.memory_path.as_ref() else {
             return Ok(());
         };
@@ -214,11 +207,7 @@ impl AccountRegistry {
             validate_account_id(requested_account_id)?;
 
             let mut data = self.lock_data()?;
-            if register_account_id
-                && data
-                    .identifiers_by_account_id
-                    .contains_key(requested_account_id)
-            {
+            if register_account_id && data.identifiers_by_account_id.contains_key(requested_account_id) {
                 return Err(AccountRegistryError::AccountIdTaken(
                     requested_account_id.to_string(),
                 ));
@@ -226,20 +215,20 @@ impl AccountRegistry {
 
             ensure_email_not_bound_elsewhere(&data, requested_account_id, customer_email)?;
 
-            let mut registry_dirty = false;
+            let mut dirty = false;
             let identifiers = data
                 .identifiers_by_account_id
                 .entry(requested_account_id.to_string())
                 .or_default();
             if append_email(&mut identifiers.emails, customer_email) {
-                registry_dirty = true;
+                dirty = true;
             }
 
-            let (memory_path, memory_path_registered) =
+            let (memory_path, memory_dirty) =
                 self.ensure_memory_path_locked(&mut data, requested_account_id)?;
-            registry_dirty |= memory_path_registered;
+            dirty |= memory_dirty;
 
-            if registry_dirty {
+            if dirty {
                 self.persist_locked(&data)?;
             }
 
@@ -258,15 +247,15 @@ impl AccountRegistry {
         }
 
         let mut data = self.lock_data()?;
-        let Some((account_id, _)) =
-            data.identifiers_by_account_id
-                .iter()
-                .find(|(_, identifiers)| {
-                    identifiers
-                        .emails
-                        .iter()
-                        .any(|email| normalize_identifier(email) == normalized_email)
-                })
+        let Some((account_id, _)) = data
+            .identifiers_by_account_id
+            .iter()
+            .find(|(_, identifiers)| {
+                identifiers
+                    .emails
+                    .iter()
+                    .any(|email| normalize_identifier(email) == normalized_email)
+            })
         else {
             return Ok(ResolvedAccount {
                 account_id: None,
@@ -274,9 +263,8 @@ impl AccountRegistry {
             });
         };
         let account_id = account_id.clone();
-        let (memory_path, memory_path_registered) =
-            self.ensure_memory_path_locked(&mut data, &account_id)?;
-        if memory_path_registered {
+        let (memory_path, dirty) = self.ensure_memory_path_locked(&mut data, &account_id)?;
+        if dirty {
             self.persist_locked(&data)?;
         }
 
@@ -301,12 +289,12 @@ impl AccountRegistry {
             return Ok((memory_path, false));
         }
 
-        let memory_path = self
-            .memory_root
-            .join(sanitize_account_id_segment(account_id));
+        let memory_path = self.memory_root.join(sanitize_account_id_segment(account_id));
         ensure_memory_source(&memory_path)?;
-        data.memory_path_by_account_id
-            .insert(account_id.to_string(), memory_path.display().to_string());
+        data.memory_path_by_account_id.insert(
+            account_id.to_string(),
+            memory_path.display().to_string(),
+        );
         Ok((memory_path, true))
     }
 
@@ -451,9 +439,7 @@ fn validate_account_id(account_id: &str) -> std::result::Result<(), AccountRegis
     {
         Ok(())
     } else {
-        Err(AccountRegistryError::InvalidAccountId(
-            account_id.to_string(),
-        ))
+        Err(AccountRegistryError::InvalidAccountId(account_id.to_string()))
     }
 }
 
@@ -591,9 +577,7 @@ mod tests {
         );
 
         let workspace_dir = root.join("workspace");
-        registry
-            .materialize_memory(&workspace_dir, &resolved)
-            .unwrap();
+        registry.materialize_memory(&workspace_dir, &resolved).unwrap();
         assert_eq!(
             fs::read_to_string(workspace_dir.join("memory/memo.md")).unwrap(),
             "# hello"
@@ -620,16 +604,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(request.account_id, "acct_manual");
-        assert_eq!(resolved.account_id, Some("acct_manual".to_string()));
+        assert_eq!(
+            resolved.account_id,
+            Some("acct_manual".to_string())
+        );
         let memory_path = resolved.memory_path.unwrap();
-        assert_eq!(
-            memory_path,
-            root.join("account_memories").join("acct_manual")
-        );
-        assert_eq!(
-            fs::read_to_string(memory_path.join("memo.md")).unwrap(),
-            "# Memo\n"
-        );
+        assert_eq!(memory_path, root.join("account_memories").join("acct_manual"));
+        assert_eq!(fs::read_to_string(memory_path.join("memo.md")).unwrap(), "# Memo\n");
 
         let persisted: AccountRegistryData =
             serde_json::from_str(&fs::read_to_string(registry_path).unwrap()).unwrap();
@@ -675,9 +656,7 @@ mod tests {
             })
             .unwrap_err();
 
-        assert!(
-            matches!(err, AccountRegistryError::AccountIdTaken(ref value) if value == "acct_manual")
-        );
+        assert!(matches!(err, AccountRegistryError::AccountIdTaken(ref value) if value == "acct_manual"));
     }
 
     #[test]
@@ -794,10 +773,7 @@ mod tests {
 
         persist_workspace_memory(&workspace_dir, &source_dir.display().to_string()).unwrap();
 
-        assert_eq!(
-            fs::read_to_string(source_dir.join("memo.md")).unwrap(),
-            "# Updated"
-        );
+        assert_eq!(fs::read_to_string(source_dir.join("memo.md")).unwrap(), "# Updated");
         assert_eq!(
             fs::read_to_string(source_dir.join("preferences.md")).unwrap(),
             "- likes tea"
