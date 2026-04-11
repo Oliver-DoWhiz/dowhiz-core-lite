@@ -712,6 +712,55 @@ mod tests {
     }
 
     #[test]
+    fn initializes_missing_memo_for_existing_memory_path_without_rewriting_registry() {
+        let root = temp_dir("account-registry-init-existing-memory");
+        let memory_dir = root.join("memory-source");
+        fs::create_dir_all(&memory_dir).unwrap();
+
+        let registry_path = root.join("account_registry.json");
+        let registry_payload = serde_json::to_string_pretty(&AccountRegistryData {
+            identifiers_by_account_id: HashMap::from([(
+                "acct_123".to_string(),
+                AccountIdentifiers {
+                    emails: vec!["dtang04@uchicago.edu".to_string()],
+                    phones: Vec::new(),
+                    slack_user_ids: Vec::new(),
+                    discord_user_ids: Vec::new(),
+                },
+            )]),
+            memory_path_by_account_id: HashMap::from([(
+                "acct_123".to_string(),
+                memory_dir.display().to_string(),
+            )]),
+        })
+        .unwrap();
+        fs::write(&registry_path, &registry_payload).unwrap();
+
+        let registry = AccountRegistry::load(&registry_path).unwrap();
+        let (_, resolved) = registry
+            .resolve_create_request(CreateTaskRequest {
+                customer_email: "dtang04@uchicago.edu".to_string(),
+                subject: "Need help".to_string(),
+                prompt: "Inspect memory".to_string(),
+                channel: "email".to_string(),
+                reply_to: String::new(),
+                tenant_id: String::new(),
+                account_id: String::new(),
+                register_account_id: false,
+                attachment_refs: Vec::new(),
+            })
+            .unwrap();
+
+        assert_eq!(resolved.account_id, Some("acct_123".to_string()));
+        assert_eq!(resolved.memory_path, Some(memory_dir.clone()));
+        assert_eq!(
+            fs::read_to_string(memory_dir.join("memo.md")).unwrap(),
+            "# Memo\n"
+        );
+        assert_eq!(fs::read_to_string(registry_path).unwrap(), registry_payload);
+    }
+
+    #[test]
     fn persists_workspace_memory_back_to_source_directory() {
         let root = temp_dir("account-registry-writeback");
         let workspace_dir = root.join("workspace");
