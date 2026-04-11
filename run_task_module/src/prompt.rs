@@ -36,5 +36,6 @@ mod tests {
 
         assert!(prompt.contains("reply_email_draft.html"));
         assert!(prompt.contains(".agents/skills/"));
+        assert!(prompt.contains("latest 10 tasks"));
     }
 }

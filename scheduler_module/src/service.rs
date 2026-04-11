@@ -8,7 +8,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 
-use crate::account_registry::AccountRegistry;
+use crate::account_registry::{AccountRegistry, AccountRegistryError};
 use crate::attachment_store::AttachmentUploadStore;
 use crate::config::GatewayConfig;
 use crate::inbound_email::{
@@ -32,6 +32,11 @@ struct HealthResponse {
     status: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+struct AccountIdSuggestionResponse {
+    account_id: String,
+}
+
 pub async fn run_gateway(config: GatewayConfig) -> Result<()> {
     let queue = FileQueue::new(config.queue_root.clone())?;
     let scheduler = Arc::new(TaskScheduler::new(queue, config.tasks_root.clone())?);
@@ -49,6 +54,7 @@ pub async fn run_gateway(config: GatewayConfig) -> Result<()> {
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/account-ids/suggest", post(generate_account_id))
         .route("/uploads", post(upload_attachments))
         .route("/tasks", post(create_task))
         .route("/tasks/:task_id", get(get_task))
@@ -68,6 +74,16 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
+async fn generate_account_id(
+    State(state): State<AppState>,
+) -> std::result::Result<Json<AccountIdSuggestionResponse>, (StatusCode, String)> {
+    let account_id = state
+        .account_registry
+        .generate_available_account_id()
+        .map_err(account_registry_error)?;
+    Ok(Json(AccountIdSuggestionResponse { account_id }))
+}
+
 async fn create_task(
     State(state): State<AppState>,
     Json(request): Json<CreateTaskRequest>,
@@ -75,7 +91,7 @@ async fn create_task(
     let attachment_count = request.attachment_refs.len();
     let attachment_refs = request.attachment_refs.clone();
     let (normalized_request, resolved_account) =
-        state.account_registry.resolve_create_request(request);
+        state.account_registry.resolve_create_request(request).map_err(account_registry_error)?;
 
     tracing::info!(
         channel = %normalized_request.channel,
@@ -167,7 +183,8 @@ async fn receive_postmark_inbound(
     );
     let (request, resolved_account) = state
         .account_registry
-        .resolve_inbound_request(task_request_from_postmark(&payload));
+        .resolve_inbound_request(task_request_from_postmark(&payload))
+        .map_err(account_registry_error)?;
     tracing::debug!(
         customer_email = %request.customer_email,
         reply_to = %request.reply_to,
@@ -197,4 +214,24 @@ async fn receive_postmark_inbound(
 
 fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+}
+
+fn account_registry_error(err: AccountRegistryError) -> (StatusCode, String) {
+    match err {
+        AccountRegistryError::AccountIdTaken(message) => {
+            (StatusCode::CONFLICT, format!("account_id '{}' has already been taken", message))
+        }
+        AccountRegistryError::EmailAlreadyBound { email, account_id } => (
+            StatusCode::CONFLICT,
+            format!("email '{}' is already linked to account '{}'", email, account_id),
+        ),
+        AccountRegistryError::InvalidAccountId(account_id) => (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "account_id '{}' must use only letters, numbers, hyphens, or underscores",
+                account_id
+            ),
+        ),
+        AccountRegistryError::Storage(err) => internal_error(err),
+    }
 }

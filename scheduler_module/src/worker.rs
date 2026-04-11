@@ -9,6 +9,7 @@ use send_emails_module::{
 };
 use uuid::Uuid;
 
+use crate::account_registry::persist_workspace_memory;
 use crate::config::{OutboundMode, WorkerConfig};
 use crate::queue::FileQueue;
 
@@ -117,8 +118,17 @@ impl WorkerService {
             attachments_dir = %output.reply_attachments_dir.display(),
             "task runner returned output"
         );
+        let request = read_task_request(workspace_dir)?;
+        persist_workspace_memory(workspace_dir, &request.memory_uri)?;
+        tracing::debug!(
+            task_id = task_id,
+            workspace_key = workspace_key,
+            workspace_dir = %workspace_dir.display(),
+            memory_uri = %request.memory_uri,
+            "persisted workspace memory back to account storage"
+        );
 
-        let subject = format!("Re: {}", envelope_subject(&workspace_dir)?);
+        let subject = format!("Re: {}", request.subject);
         let preview = build_outbound_preview(
             &output.reply_html_path,
             &output.reply_attachments_dir,
@@ -140,7 +150,7 @@ impl WorkerService {
             preview_path = %workspace_dir.join("transport_preview.json").display(),
             "wrote outbound preview artifact"
         );
-        self.deliver_reply(task_id, workspace_key, workspace_dir, &preview, subject)?;
+        self.deliver_reply(task_id, workspace_key, workspace_dir, &request, &preview, subject)?;
         Ok(())
     }
 
@@ -149,6 +159,7 @@ impl WorkerService {
         task_id: &str,
         workspace_key: &str,
         workspace_dir: &PathBuf,
+        request: &crate::models::InboundTaskRequest,
         preview: &send_emails_module::OutboundPreview,
         subject: String,
     ) -> Result<()> {
@@ -163,7 +174,6 @@ impl WorkerService {
             return Ok(());
         }
 
-        let request = read_task_request(workspace_dir)?;
         let from = self
             .config
             .postmark_from
@@ -201,7 +211,7 @@ impl WorkerService {
                 to,
                 subject,
                 html_body: preview.html_body.clone(),
-                reply_to: Some(request.customer_email),
+                reply_to: Some(request.customer_email.clone()),
                 tag: self.config.postmark_tag.clone(),
             },
             &workspace_dir.join("reply_email_attachments"),
@@ -224,10 +234,6 @@ impl WorkerService {
 fn read_task_request(workspace_dir: &PathBuf) -> Result<crate::models::InboundTaskRequest> {
     let payload = fs::read_to_string(workspace_dir.join("task_request.json"))?;
     Ok(serde_json::from_str(&payload)?)
-}
-
-fn envelope_subject(workspace_dir: &PathBuf) -> Result<String> {
-    Ok(read_task_request(workspace_dir)?.subject)
 }
 
 fn execution_mode_label(use_container: bool, container_mode: run_task_module::ContainerMode) -> &'static str {

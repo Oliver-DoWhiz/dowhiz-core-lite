@@ -15,6 +15,8 @@ pub struct CreateTaskRequest {
     #[serde(default)]
     pub account_id: String,
     #[serde(default)]
+    pub register_account_id: bool,
+    #[serde(default)]
     pub attachment_refs: Vec<AttachmentUploadRef>,
 }
 

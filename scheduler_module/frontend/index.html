@@ -35,6 +35,21 @@
               <input id="reply-to" name="replyTo" type="email" value="dtang04@uchicago.edu" />
             </label>
 
+            <div class="account-card">
+              <div class="account-header">
+                <div>
+                  <span class="label">Account identity</span>
+                  <p class="attachment-copy">Use an existing account ID, or generate a new one before the task is queued.</p>
+                </div>
+                <button id="generate-account-id" type="button" class="ghost-button">Generate new ID</button>
+              </div>
+              <label>
+                Account ID
+                <input id="account-id" name="accountId" type="text" placeholder="acct_dylan" autocomplete="off" />
+              </label>
+              <p id="account-status" class="muted">Leave blank to use the legacy email-only lookup flow.</p>
+            </div>
+
             <label>
               Subject
               <input id="subject" name="subject" type="text" value="Frontend proof of concept" required />
