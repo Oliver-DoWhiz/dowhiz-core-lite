@@ -1,19 +1,22 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{anyhow, Context, Result};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::models::{CreateTaskRequest, InboundTaskRequest};
 
+const IDENTIFIERS_DB_FILE: &str = "account_identifiers.sqlite3";
+const MEMORY_PATHS_DB_FILE: &str = "account_memory_paths.sqlite3";
+
 #[derive(Debug)]
 pub struct AccountRegistry {
-    path: PathBuf,
+    identifiers_db_path: PathBuf,
+    memory_paths_db_path: PathBuf,
     memory_root: PathBuf,
-    data: Mutex<AccountRegistryData>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -57,7 +60,11 @@ impl std::fmt::Display for AccountRegistryError {
                 write!(f, "account_id '{}' has already been taken", account_id)
             }
             Self::EmailAlreadyBound { email, account_id } => {
-                write!(f, "email '{}' is already linked to account '{}'", email, account_id)
+                write!(
+                    f,
+                    "email '{}' is already linked to account '{}'",
+                    email, account_id
+                )
             }
             Self::InvalidAccountId(account_id) => write!(
                 f,
@@ -83,6 +90,12 @@ impl From<std::io::Error> for AccountRegistryError {
     }
 }
 
+impl From<rusqlite::Error> for AccountRegistryError {
+    fn from(err: rusqlite::Error) -> Self {
+        Self::Storage(err.into())
+    }
+}
+
 impl From<serde_json::Error> for AccountRegistryError {
     fn from(err: serde_json::Error) -> Self {
         Self::Storage(err.into())
@@ -91,26 +104,25 @@ impl From<serde_json::Error> for AccountRegistryError {
 
 impl AccountRegistry {
     pub fn load(path: impl Into<PathBuf>) -> Result<Self> {
-        let path = path.into();
-        let memory_root = default_memory_root(&path);
-        if !path.exists() {
-            return Ok(Self {
-                path,
-                memory_root,
-                data: Mutex::new(AccountRegistryData::default()),
-            });
-        }
+        let legacy_registry_path = path.into();
+        let registry_dir = legacy_registry_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let identifiers_db_path = registry_dir.join(IDENTIFIERS_DB_FILE);
+        let memory_paths_db_path = registry_dir.join(MEMORY_PATHS_DB_FILE);
 
-        let payload = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read account registry {}", path.display()))?;
-        let data = serde_json::from_str::<AccountRegistryData>(&payload).with_context(|| {
-            format!("failed to parse account registry {}", path.display())
-        })?;
+        initialize_store(&identifiers_db_path, &memory_paths_db_path)?;
+        migrate_legacy_registry_if_needed(
+            &legacy_registry_path,
+            &identifiers_db_path,
+            &memory_paths_db_path,
+        )?;
 
         Ok(Self {
-            path,
-            memory_root,
-            data: Mutex::new(data),
+            identifiers_db_path,
+            memory_paths_db_path,
+            memory_root: default_memory_root(&legacy_registry_path),
         })
     }
 
@@ -150,11 +162,10 @@ impl AccountRegistry {
     pub fn generate_available_account_id(
         &self,
     ) -> std::result::Result<String, AccountRegistryError> {
-        let data = self.lock_data()?;
         for _ in 0..32 {
             let suffix = Uuid::new_v4().simple().to_string();
             let candidate = format!("acct_{}", &suffix[..12]);
-            if !data.identifiers_by_account_id.contains_key(&candidate) {
+            if !account_exists(&self.identifiers_db_path, &candidate)? {
                 return Ok(candidate);
             }
         }
@@ -162,7 +173,11 @@ impl AccountRegistry {
         Err(anyhow!("failed to generate a unique account_id").into())
     }
 
-    pub fn materialize_memory(&self, workspace_dir: &Path, resolved: &ResolvedAccount) -> Result<()> {
+    pub fn materialize_memory(
+        &self,
+        workspace_dir: &Path,
+        resolved: &ResolvedAccount,
+    ) -> Result<()> {
         let Some(memory_path) = resolved.memory_path.as_ref() else {
             return Ok(());
         };
@@ -205,33 +220,13 @@ impl AccountRegistry {
         let requested_account_id = requested_account_id.trim();
         if !requested_account_id.is_empty() {
             validate_account_id(requested_account_id)?;
-
-            let mut data = self.lock_data()?;
-            if register_account_id && data.identifiers_by_account_id.contains_key(requested_account_id) {
-                return Err(AccountRegistryError::AccountIdTaken(
-                    requested_account_id.to_string(),
-                ));
-            }
-
-            ensure_email_not_bound_elsewhere(&data, requested_account_id, customer_email)?;
-
-            let mut dirty = false;
-            let identifiers = data
-                .identifiers_by_account_id
-                .entry(requested_account_id.to_string())
-                .or_default();
-            if append_email(&mut identifiers.emails, customer_email) {
-                dirty = true;
-            }
-
-            let (memory_path, memory_dirty) =
-                self.ensure_memory_path_locked(&mut data, requested_account_id)?;
-            dirty |= memory_dirty;
-
-            if dirty {
-                self.persist_locked(&data)?;
-            }
-
+            reserve_or_update_requested_account(
+                &self.identifiers_db_path,
+                requested_account_id,
+                customer_email,
+                register_account_id,
+            )?;
+            let memory_path = self.ensure_memory_path(requested_account_id)?;
             return Ok(ResolvedAccount {
                 account_id: Some(requested_account_id.to_string()),
                 memory_path: Some(memory_path),
@@ -246,83 +241,39 @@ impl AccountRegistry {
             });
         }
 
-        let mut data = self.lock_data()?;
-        let Some((account_id, _)) = data
-            .identifiers_by_account_id
-            .iter()
-            .find(|(_, identifiers)| {
-                identifiers
-                    .emails
-                    .iter()
-                    .any(|email| normalize_identifier(email) == normalized_email)
-            })
+        let Some(account_id) =
+            find_account_id_by_email(&self.identifiers_db_path, &normalized_email)?
         else {
             return Ok(ResolvedAccount {
                 account_id: None,
                 memory_path: None,
             });
         };
-        let account_id = account_id.clone();
-        let (memory_path, dirty) = self.ensure_memory_path_locked(&mut data, &account_id)?;
-        if dirty {
-            self.persist_locked(&data)?;
-        }
 
+        let memory_path = self.ensure_memory_path(&account_id)?;
         Ok(ResolvedAccount {
             account_id: Some(account_id),
             memory_path: Some(memory_path),
         })
     }
 
-    fn ensure_memory_path_locked(
+    fn ensure_memory_path(
         &self,
-        data: &mut AccountRegistryData,
         account_id: &str,
-    ) -> std::result::Result<(PathBuf, bool), AccountRegistryError> {
-        if let Some(memory_path) = data
-            .memory_path_by_account_id
-            .get(account_id)
-            .map(|value| PathBuf::from(value.trim()))
-            .filter(|value| !value.as_os_str().is_empty())
-        {
-            ensure_memory_source(&memory_path)?;
-            return Ok((memory_path, false));
-        }
-
-        let memory_path = self.memory_root.join(sanitize_account_id_segment(account_id));
+    ) -> std::result::Result<PathBuf, AccountRegistryError> {
+        let default_memory_path = self
+            .memory_root
+            .join(sanitize_account_id_segment(account_id))
+            .display()
+            .to_string();
+        let stored_memory_path = ensure_memory_path_record(
+            &self.memory_paths_db_path,
+            account_id,
+            &default_memory_path,
+        )?;
+        let memory_path = PathBuf::from(stored_memory_path.trim());
         ensure_memory_source(&memory_path)?;
-        data.memory_path_by_account_id.insert(
-            account_id.to_string(),
-            memory_path.display().to_string(),
-        );
-        Ok((memory_path, true))
-    }
-
-    fn persist_locked(
-        &self,
-        data: &AccountRegistryData,
-    ) -> std::result::Result<(), AccountRegistryError> {
-        let payload = serde_json::to_string_pretty(data)?;
-        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
-        let tmp_path = self.path.with_extension("tmp");
-        fs::write(&tmp_path, payload)
-            .with_context(|| format!("failed to write account registry {}", tmp_path.display()))?;
-        fs::rename(&tmp_path, &self.path).with_context(|| {
-            format!(
-                "failed to move account registry temp file into place: {}",
-                self.path.display()
-            )
-        })?;
-        Ok(())
-    }
-
-    fn lock_data(
-        &self,
-    ) -> std::result::Result<MutexGuard<'_, AccountRegistryData>, AccountRegistryError> {
-        self.data
-            .lock()
-            .map_err(|_| anyhow!("account registry lock poisoned").into())
+        Ok(memory_path)
     }
 }
 
@@ -361,6 +312,374 @@ pub fn persist_workspace_memory(workspace_dir: &Path, memory_uri: &str) -> Resul
 
     remove_existing_path(&target)?;
     copy_memory_tree(&source_dir, &target)
+}
+
+fn initialize_store(identifiers_db_path: &Path, memory_paths_db_path: &Path) -> Result<()> {
+    let conn = open_attached_connection(identifiers_db_path, memory_paths_db_path)?;
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS account_identifiers (
+            account_id TEXT PRIMARY KEY,
+            emails_json TEXT NOT NULL DEFAULT '[]',
+            phones_json TEXT NOT NULL DEFAULT '[]',
+            slack_user_ids_json TEXT NOT NULL DEFAULT '[]',
+            discord_user_ids_json TEXT NOT NULL DEFAULT '[]'
+        );
+
+        CREATE TABLE IF NOT EXISTS account_emails (
+            email TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES account_identifiers(account_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_account_emails_account_id
+            ON account_emails(account_id);
+
+        CREATE TABLE IF NOT EXISTS memory_registry.account_memory_paths (
+            account_id TEXT PRIMARY KEY,
+            memory_path TEXT NOT NULL
+        );
+        ",
+    )?;
+    Ok(())
+}
+
+fn migrate_legacy_registry_if_needed(
+    legacy_registry_path: &Path,
+    identifiers_db_path: &Path,
+    memory_paths_db_path: &Path,
+) -> Result<()> {
+    if !legacy_registry_path.exists() {
+        return Ok(());
+    }
+
+    let mut conn = open_attached_connection(identifiers_db_path, memory_paths_db_path)?;
+    let identifiers_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM account_identifiers", [], |row| {
+            row.get(0)
+        })?;
+    let memory_paths_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memory_registry.account_memory_paths",
+        [],
+        |row| row.get(0),
+    )?;
+    if identifiers_count > 0 || memory_paths_count > 0 {
+        return Ok(());
+    }
+
+    let payload = fs::read_to_string(legacy_registry_path).with_context(|| {
+        format!(
+            "failed to read account registry {}",
+            legacy_registry_path.display()
+        )
+    })?;
+    let data = serde_json::from_str::<AccountRegistryData>(&payload).with_context(|| {
+        format!(
+            "failed to parse account registry {}",
+            legacy_registry_path.display()
+        )
+    })?;
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for (account_id, identifiers) in &data.identifiers_by_account_id {
+        upsert_account_identifiers_tx(&tx, account_id, identifiers)?;
+    }
+    for (account_id, memory_path) in &data.memory_path_by_account_id {
+        tx.execute(
+            "INSERT OR REPLACE INTO memory_registry.account_memory_paths (account_id, memory_path)
+             VALUES (?1, ?2)",
+            params![account_id, memory_path],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn reserve_or_update_requested_account(
+    identifiers_db_path: &Path,
+    account_id: &str,
+    customer_email: &str,
+    register_account_id: bool,
+) -> std::result::Result<(), AccountRegistryError> {
+    let mut conn = open_identifiers_connection(identifiers_db_path)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+    let normalized_email = normalize_identifier(customer_email);
+    if !normalized_email.is_empty() {
+        if let Some(bound_account_id) = find_email_binding_tx(&tx, &normalized_email)? {
+            if bound_account_id != account_id {
+                return Err(AccountRegistryError::EmailAlreadyBound {
+                    email: customer_email.trim().to_string(),
+                    account_id: bound_account_id,
+                });
+            }
+        }
+    }
+
+    let existing_identifiers = load_account_identifiers_tx(&tx, account_id)?;
+    if register_account_id && existing_identifiers.is_some() {
+        return Err(AccountRegistryError::AccountIdTaken(account_id.to_string()));
+    }
+
+    let mut identifiers = existing_identifiers.unwrap_or_default();
+    let should_persist = append_email(&mut identifiers.emails, customer_email)
+        || !account_exists_tx(&tx, account_id)?;
+    if should_persist {
+        upsert_account_identifiers_tx(&tx, account_id, &identifiers)?;
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+fn account_exists(
+    identifiers_db_path: &Path,
+    account_id: &str,
+) -> std::result::Result<bool, AccountRegistryError> {
+    let conn = open_identifiers_connection(identifiers_db_path)?;
+    account_exists_conn(&conn, account_id)
+}
+
+fn account_exists_conn(
+    conn: &Connection,
+    account_id: &str,
+) -> std::result::Result<bool, AccountRegistryError> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM account_identifiers WHERE account_id = ?1 LIMIT 1",
+            params![account_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn account_exists_tx(
+    tx: &Transaction<'_>,
+    account_id: &str,
+) -> std::result::Result<bool, AccountRegistryError> {
+    Ok(tx
+        .query_row(
+            "SELECT 1 FROM account_identifiers WHERE account_id = ?1 LIMIT 1",
+            params![account_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn find_account_id_by_email(
+    identifiers_db_path: &Path,
+    normalized_email: &str,
+) -> std::result::Result<Option<String>, AccountRegistryError> {
+    let conn = open_identifiers_connection(identifiers_db_path)?;
+    Ok(conn
+        .query_row(
+            "SELECT account_id FROM account_emails WHERE email = ?1",
+            params![normalized_email],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn find_email_binding_tx(
+    tx: &Transaction<'_>,
+    normalized_email: &str,
+) -> std::result::Result<Option<String>, AccountRegistryError> {
+    Ok(tx
+        .query_row(
+            "SELECT account_id FROM account_emails WHERE email = ?1",
+            params![normalized_email],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+#[cfg(test)]
+fn load_account_identifiers(
+    identifiers_db_path: &Path,
+    account_id: &str,
+) -> std::result::Result<Option<AccountIdentifiers>, AccountRegistryError> {
+    let conn = open_identifiers_connection(identifiers_db_path)?;
+    load_account_identifiers_conn(&conn, account_id)
+}
+
+#[cfg(test)]
+fn load_account_identifiers_conn(
+    conn: &Connection,
+    account_id: &str,
+) -> std::result::Result<Option<AccountIdentifiers>, AccountRegistryError> {
+    Ok(conn
+        .query_row(
+            "
+            SELECT emails_json, phones_json, slack_user_ids_json, discord_user_ids_json
+            FROM account_identifiers
+            WHERE account_id = ?1
+            ",
+            params![account_id],
+            |row| {
+                Ok(AccountIdentifiers {
+                    emails: decode_json_vec(row.get::<_, String>(0)?)?,
+                    phones: decode_json_vec(row.get::<_, String>(1)?)?,
+                    slack_user_ids: decode_json_vec(row.get::<_, String>(2)?)?,
+                    discord_user_ids: decode_json_vec(row.get::<_, String>(3)?)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn load_account_identifiers_tx(
+    tx: &Transaction<'_>,
+    account_id: &str,
+) -> std::result::Result<Option<AccountIdentifiers>, AccountRegistryError> {
+    Ok(tx
+        .query_row(
+            "
+            SELECT emails_json, phones_json, slack_user_ids_json, discord_user_ids_json
+            FROM account_identifiers
+            WHERE account_id = ?1
+            ",
+            params![account_id],
+            |row| {
+                Ok(AccountIdentifiers {
+                    emails: decode_json_vec(row.get::<_, String>(0)?)?,
+                    phones: decode_json_vec(row.get::<_, String>(1)?)?,
+                    slack_user_ids: decode_json_vec(row.get::<_, String>(2)?)?,
+                    discord_user_ids: decode_json_vec(row.get::<_, String>(3)?)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn upsert_account_identifiers_tx(
+    tx: &Transaction<'_>,
+    account_id: &str,
+    identifiers: &AccountIdentifiers,
+) -> std::result::Result<(), AccountRegistryError> {
+    tx.execute(
+        "
+        INSERT INTO account_identifiers (
+            account_id,
+            emails_json,
+            phones_json,
+            slack_user_ids_json,
+            discord_user_ids_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(account_id) DO UPDATE SET
+            emails_json = excluded.emails_json,
+            phones_json = excluded.phones_json,
+            slack_user_ids_json = excluded.slack_user_ids_json,
+            discord_user_ids_json = excluded.discord_user_ids_json
+        ",
+        params![
+            account_id,
+            encode_json_vec(&identifiers.emails)?,
+            encode_json_vec(&identifiers.phones)?,
+            encode_json_vec(&identifiers.slack_user_ids)?,
+            encode_json_vec(&identifiers.discord_user_ids)?,
+        ],
+    )?;
+
+    tx.execute(
+        "DELETE FROM account_emails WHERE account_id = ?1",
+        params![account_id],
+    )?;
+
+    let mut seen = HashSet::new();
+    for email in &identifiers.emails {
+        let normalized_email = normalize_identifier(email);
+        if normalized_email.is_empty() || !seen.insert(normalized_email.clone()) {
+            continue;
+        }
+
+        tx.execute(
+            "INSERT OR REPLACE INTO account_emails (email, account_id) VALUES (?1, ?2)",
+            params![normalized_email, account_id],
+        )?;
+    }
+
+    Ok(())
+}
+
+fn ensure_memory_path_record(
+    memory_paths_db_path: &Path,
+    account_id: &str,
+    default_memory_path: &str,
+) -> std::result::Result<String, AccountRegistryError> {
+    let mut conn = open_memory_connection(memory_paths_db_path)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if let Some(existing_memory_path) = tx
+        .query_row(
+            "SELECT memory_path FROM account_memory_paths WHERE account_id = ?1",
+            params![account_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        tx.commit()?;
+        return Ok(existing_memory_path);
+    }
+
+    tx.execute(
+        "INSERT INTO account_memory_paths (account_id, memory_path) VALUES (?1, ?2)",
+        params![account_id, default_memory_path],
+    )?;
+    tx.commit()?;
+    Ok(default_memory_path.to_string())
+}
+
+fn open_identifiers_connection(path: &Path) -> Result<Connection> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let conn = Connection::open(path)
+        .with_context(|| format!("failed to open account identifiers db {}", path.display()))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(conn)
+}
+
+fn open_memory_connection(path: &Path) -> Result<Connection> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    Connection::open(path)
+        .with_context(|| format!("failed to open account memory paths db {}", path.display()))
+}
+
+fn open_attached_connection(
+    identifiers_db_path: &Path,
+    memory_paths_db_path: &Path,
+) -> Result<Connection> {
+    let conn = open_identifiers_connection(identifiers_db_path)?;
+    conn.execute(
+        "ATTACH DATABASE ?1 AS memory_registry",
+        params![memory_paths_db_path.display().to_string()],
+    )
+    .with_context(|| {
+        format!(
+            "failed to attach account memory paths db {}",
+            memory_paths_db_path.display()
+        )
+    })?;
+    Ok(conn)
+}
+
+fn encode_json_vec(values: &[String]) -> Result<String> {
+    serde_json::to_string(values).context("failed to encode identifier array")
+}
+
+fn decode_json_vec(value: String) -> rusqlite::Result<Vec<String>> {
+    serde_json::from_str(&value).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(
+            value.len(),
+            rusqlite::types::Type::Text,
+            Box::new(err),
+        )
+    })
 }
 
 fn copy_memory_tree(source: &Path, target: &Path) -> Result<()> {
@@ -439,7 +758,9 @@ fn validate_account_id(account_id: &str) -> std::result::Result<(), AccountRegis
     {
         Ok(())
     } else {
-        Err(AccountRegistryError::InvalidAccountId(account_id.to_string()))
+        Err(AccountRegistryError::InvalidAccountId(
+            account_id.to_string(),
+        ))
     }
 }
 
@@ -480,36 +801,6 @@ fn append_email(emails: &mut Vec<String>, email: &str) -> bool {
     true
 }
 
-fn ensure_email_not_bound_elsewhere(
-    data: &AccountRegistryData,
-    target_account_id: &str,
-    customer_email: &str,
-) -> std::result::Result<(), AccountRegistryError> {
-    let normalized_email = normalize_identifier(customer_email);
-    if normalized_email.is_empty() {
-        return Ok(());
-    }
-
-    for (account_id, identifiers) in &data.identifiers_by_account_id {
-        if account_id == target_account_id {
-            continue;
-        }
-
-        if identifiers
-            .emails
-            .iter()
-            .any(|email| normalize_identifier(email) == normalized_email)
-        {
-            return Err(AccountRegistryError::EmailAlreadyBound {
-                email: customer_email.trim().to_string(),
-                account_id: account_id.clone(),
-            });
-        }
-    }
-
-    Ok(())
-}
-
 fn normalize_identifier(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
@@ -520,6 +811,49 @@ mod tests {
 
     use super::*;
     use crate::models::CreateTaskRequest;
+
+    #[test]
+    fn migrates_legacy_json_registry_into_sqlite_on_load() {
+        let root = temp_dir("account-registry-migrate");
+        let registry_path = root.join("account_registry.json");
+        fs::write(
+            &registry_path,
+            serde_json::to_string_pretty(&AccountRegistryData {
+                identifiers_by_account_id: HashMap::from([(
+                    "acct_123".to_string(),
+                    AccountIdentifiers {
+                        emails: vec!["dtang04@uchicago.edu".to_string()],
+                        phones: vec!["+16309153426".to_string()],
+                        slack_user_ids: vec!["U0AG9M23K1R".to_string()],
+                        discord_user_ids: Vec::new(),
+                    },
+                )]),
+                memory_path_by_account_id: HashMap::from([(
+                    "acct_123".to_string(),
+                    root.join("memory-source").display().to_string(),
+                )]),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let _registry = AccountRegistry::load(&registry_path).unwrap();
+
+        let identifiers = load_account_identifiers(&root.join(IDENTIFIERS_DB_FILE), "acct_123")
+            .unwrap()
+            .unwrap();
+        assert_eq!(identifiers.emails, vec!["dtang04@uchicago.edu".to_string()]);
+        assert_eq!(identifiers.phones, vec!["+16309153426".to_string()]);
+        assert_eq!(
+            ensure_memory_path_record(
+                &root.join(MEMORY_PATHS_DB_FILE),
+                "acct_123",
+                "ignored-default"
+            )
+            .unwrap(),
+            root.join("memory-source").display().to_string()
+        );
+    }
 
     #[test]
     fn resolves_account_by_email_and_injects_memory_path() {
@@ -571,13 +905,12 @@ mod tests {
             request.identity_uri,
             "account_registry://acct_123".to_string()
         );
-        assert_eq!(
-            resolved.memory_path,
-            Some(PathBuf::from(memory_dir.display().to_string()))
-        );
+        assert_eq!(resolved.memory_path, Some(memory_dir.clone()));
 
         let workspace_dir = root.join("workspace");
-        registry.materialize_memory(&workspace_dir, &resolved).unwrap();
+        registry
+            .materialize_memory(&workspace_dir, &resolved)
+            .unwrap();
         assert_eq!(
             fs::read_to_string(workspace_dir.join("memory/memo.md")).unwrap(),
             "# hello"
@@ -604,23 +937,32 @@ mod tests {
             .unwrap();
 
         assert_eq!(request.account_id, "acct_manual");
-        assert_eq!(
-            resolved.account_id,
-            Some("acct_manual".to_string())
-        );
+        assert_eq!(resolved.account_id, Some("acct_manual".to_string()));
         let memory_path = resolved.memory_path.unwrap();
-        assert_eq!(memory_path, root.join("account_memories").join("acct_manual"));
-        assert_eq!(fs::read_to_string(memory_path.join("memo.md")).unwrap(), "# Memo\n");
-
-        let persisted: AccountRegistryData =
-            serde_json::from_str(&fs::read_to_string(registry_path).unwrap()).unwrap();
         assert_eq!(
-            persisted
-                .identifiers_by_account_id
-                .get("acct_manual")
-                .unwrap()
-                .emails,
-            vec!["dtang04@uchicago.edu".to_string()]
+            memory_path,
+            root.join("account_memories").join("acct_manual")
+        );
+        assert_eq!(
+            fs::read_to_string(memory_path.join("memo.md")).unwrap(),
+            "# Memo\n"
+        );
+
+        let identifiers = load_account_identifiers(&root.join(IDENTIFIERS_DB_FILE), "acct_manual")
+            .unwrap()
+            .unwrap();
+        assert_eq!(identifiers.emails, vec!["dtang04@uchicago.edu".to_string()]);
+        assert_eq!(
+            ensure_memory_path_record(
+                &root.join(MEMORY_PATHS_DB_FILE),
+                "acct_manual",
+                "ignored-default"
+            )
+            .unwrap(),
+            root.join("account_memories")
+                .join("acct_manual")
+                .display()
+                .to_string()
         );
     }
 
@@ -656,7 +998,9 @@ mod tests {
             })
             .unwrap_err();
 
-        assert!(matches!(err, AccountRegistryError::AccountIdTaken(ref value) if value == "acct_manual"));
+        assert!(
+            matches!(err, AccountRegistryError::AccountIdTaken(ref value) if value == "acct_manual")
+        );
     }
 
     #[test]
@@ -696,14 +1040,11 @@ mod tests {
             })
             .unwrap();
 
-        let persisted: AccountRegistryData =
-            serde_json::from_str(&fs::read_to_string(registry_path).unwrap()).unwrap();
+        let identifiers = load_account_identifiers(&root.join(IDENTIFIERS_DB_FILE), "acct_manual")
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            persisted
-                .identifiers_by_account_id
-                .get("acct_manual")
-                .unwrap()
-                .emails,
+            identifiers.emails,
             vec![
                 "dylan@dowhiz.com".to_string(),
                 "dtang04@uchicago.edu".to_string()
@@ -712,7 +1053,7 @@ mod tests {
     }
 
     #[test]
-    fn initializes_missing_memo_for_existing_memory_path_without_rewriting_registry() {
+    fn initializes_missing_memo_for_existing_memory_path_without_rewriting_legacy_registry() {
         let root = temp_dir("account-registry-init-existing-memory");
         let memory_dir = root.join("memory-source");
         fs::create_dir_all(&memory_dir).unwrap();
@@ -773,7 +1114,10 @@ mod tests {
 
         persist_workspace_memory(&workspace_dir, &source_dir.display().to_string()).unwrap();
 
-        assert_eq!(fs::read_to_string(source_dir.join("memo.md")).unwrap(), "# Updated");
+        assert_eq!(
+            fs::read_to_string(source_dir.join("memo.md")).unwrap(),
+            "# Updated"
+        );
         assert_eq!(
             fs::read_to_string(source_dir.join("preferences.md")).unwrap(),
             "- likes tea"
